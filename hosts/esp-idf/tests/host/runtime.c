@@ -120,6 +120,48 @@ static void test_binding(const unsigned char *pak, size_t pak_size) {
   pocketjs_ui_core_destroy(core);
 }
 
+static void test_touch_capture_reuse(const unsigned char *pak, size_t pak_size) {
+  pocketjs_guest_t *guest = guest_new();
+  pocketjs_ui_core_t *core = core_new();
+  pocketjs_ui_qjs_config_t config = {
+      .struct_size = sizeof(config), .target_id = "idf-smoke", .host_abi = 1};
+  pocketjs_ui_qjs_t *binding = NULL;
+  assert(pocketjs_ui_qjs_create(guest, core, &config, &binding) == ESP_OK);
+  assert(pocketjs_ui_qjs_feed_pak(binding, pak, pak_size) == ESP_OK);
+  assert(pocketjs_ui_qjs_mount(binding) == ESP_OK);
+  const char *source =
+      "globalThis.a=ui.createNode(0);globalThis.b=ui.createNode(0);"
+      "for(const [id,x] of [[a,0],[b,100]]){"
+      "ui.setProp(id,24,1);ui.setProp(id,28,x);ui.setProp(id,25,0);"
+      "ui.setProp(id,1,50);ui.setProp(id,2,50);ui.insertBefore(1,id,0);}"
+      "globalThis.expected=0;globalThis.frame=(buttons,analog,touches,hits)=>{"
+      "if(touches&&hits[0]!==expected) throw Error('stale touch capture');};";
+  assert(pocketjs_guest_eval(guest, source, strlen(source), "touch reuse") == ESP_OK);
+  JSContext *ctx = pocketjs_guest_quickjs_context(guest);
+  pocketjs_ui_frame_view_t frame = {.struct_size = sizeof(frame)};
+  pocketjs_ui_touch_t contact = {.id = 0, .x = 20, .y = 20};
+  pocketjs_ui_input_t input = {
+      .struct_size = sizeof(input), .touches = &contact, .touch_count = 1};
+  eval(ctx, "expected=a");
+  assert(pocketjs_ui_turn(binding, &input, &frame) == ESP_OK);
+  contact.x = 120; /* A held contact carries A's hit while moving over B. */
+  assert(pocketjs_ui_turn(binding, &input, &frame) == ESP_OK);
+  input.touch_count = 0;
+  assert(pocketjs_ui_turn(binding, &input, &frame) == ESP_OK);
+  eval(ctx, "expected=b");
+  input.touch_count = 1; /* Reusing the controller id resolves B on a new down. */
+  assert(pocketjs_ui_turn(binding, &input, &frame) == ESP_OK);
+
+  /* The C ABI also accepts NULL pointers for an empty snapshot. */
+  assert(pocketjs_ui_core_touch_hits(core, NULL, 0, NULL, 0) == 0);
+  contact.x = 20;
+  eval(ctx, "expected=a");
+  assert(pocketjs_ui_turn(binding, &input, &frame) == ESP_OK);
+  pocketjs_guest_destroy(guest);
+  pocketjs_ui_qjs_destroy(binding);
+  pocketjs_ui_core_destroy(core);
+}
+
 static void test_atomic_assets(const unsigned char *good, size_t good_size,
                                const unsigned char *bad, size_t bad_size) {
   for (int fault = -1; fault < 9; ++fault) {
@@ -184,6 +226,7 @@ int main(int argc, char **argv) {
   test_rejection_reporting_reentrancy();
   test_atomic_assets(good, good_size, bad, bad_size);
   test_binding(good, good_size);
+  test_touch_capture_reuse(good, good_size);
   free(good);
   free(bad);
   puts("IDF host runtime regressions passed");

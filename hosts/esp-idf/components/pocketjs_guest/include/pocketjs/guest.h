@@ -20,6 +20,9 @@ typedef struct {
   size_t heap_limit;
   size_t stack_limit;
   bool prefer_psram;
+  /** QuickJS malloc-size GC trigger; 0 keeps the engine default (256 kB).
+   * Larger values trade peak heap for fewer stop-the-world collections. */
+  size_t gc_threshold;
 } pocketjs_guest_config_t;
 
 typedef struct {
@@ -60,6 +63,10 @@ void pocketjs_guest_interrupt(pocketjs_guest_t *guest);
 
 esp_err_t pocketjs_guest_stats(pocketjs_guest_t *guest,
                                pocketjs_guest_stats_t *out_stats);
+
+/** Run one full JS garbage collection pass now. Use from an idle frame to
+ * keep the engine's adaptive trigger from firing mid-render. */
+void pocketjs_guest_run_gc(pocketjs_guest_t *guest);
 
 void pocketjs_guest_destroy(pocketjs_guest_t *guest);
 

@@ -1,0 +1,10 @@
+# Cargo artifacts of the pocketjs-aic staticlib.
+rust/target/
+
+# The prepared quickjs.c and anything else derived at build time.
+build/
+
+# Written by tools/aic.ts package from pocket.host.json.
+generated/
+# SCons compiles the port sources in place; objects stay untracked.
+*.o

@@ -1,5 +1,13 @@
 /** Stable API for Pocket manifests and custom native hosts. */
 export {
+  POCKET_AIC_HOST_ABI,
+  POCKET_AIC_HOST_SCHEMA_ID,
+  POCKET_AIC_HOST_VERSION,
+  POCKET_AIC_UI_CAPABILITIES,
+  pocketAicHostSchema,
+  type PocketAicHostProfile,
+} from "../../../contracts/spec/aic-host.ts";
+export {
   POCKET_IDF_HOST_ABI,
   POCKET_IDF_HOST_SCHEMA_ID,
   POCKET_IDF_HOST_VERSION,
@@ -59,3 +67,11 @@ export {
 } from "./system.ts";
 export { vitaTitleId } from "./vita-package.ts";
 export { createHostExtension, isHostExtension, type HostExtension } from "./host-extension.ts";
+export {
+  aicHostBuildEnvironment,
+  hashPocketAicHostProfile,
+  pocketAicHostExtension,
+  pocketAicHostRegistry,
+  readAicHostExtension,
+  validatePocketAicHostProfile,
+} from "./aic-host.ts";

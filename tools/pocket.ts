@@ -17,6 +17,12 @@ import {
   pocketIdfHostRegistry,
   validatePocketIdfHostProfile,
 } from "../framework/src/manifest/idf-host.ts";
+import {
+  hashPocketAicHostProfile,
+  pocketAicHostExtension,
+  pocketAicHostRegistry,
+  validatePocketAicHostProfile,
+} from "../framework/src/manifest/aic-host.ts";
 import { encodePocketPackage } from "../contracts/spec/pocket-package.ts";
 import { makeVariant } from "./pocket-pack.ts";
 
@@ -81,10 +87,23 @@ let target = targetOption ?? "";
 let tickHz = 60;
 let profileHash: string | undefined;
 let registry = undefined;
+let hostPlatform: "esp-idf" | "aic" | undefined;
 if (hostProfileOption) {
   const hostProfilePath = resolve(hostProfileOption);
-  if (!existsSync(hostProfilePath)) usage(`host profile not found: ${hostProfilePath}`);
-  const validated = validatePocketIdfHostProfile(await Bun.file(hostProfilePath).json());
+  if (!existsSync(hostProfilePath)) usage(`host profile not found: ${hostProfileOption}`);
+  const profileInput: unknown = await Bun.file(hostProfilePath).json();
+  const schemaId = typeof (profileInput as { $schema?: unknown })?.$schema === "string"
+    ? (profileInput as { $schema: string }).$schema
+    : "";
+  hostPlatform = schemaId === "https://pocketjs.dev/schema/pocket-aic-host-1.json"
+    ? "aic"
+    : schemaId === "https://pocketjs.dev/schema/pocket-idf-host-1.json"
+    ? "esp-idf"
+    : undefined;
+  if (!hostPlatform) usage("host profile $schema must be a pocket host profile format 1");
+  const validated = hostPlatform === "aic"
+    ? validatePocketAicHostProfile(profileInput)
+    : validatePocketIdfHostProfile(profileInput);
   if (!validated.ok) {
     for (const diagnostic of validated.diagnostics) {
       console.error(`${diagnostic.code} ${diagnostic.path || "/"}: ${diagnostic.message}`);
@@ -93,14 +112,24 @@ if (hostProfileOption) {
   }
   target = validated.value.id;
   tickHz = validated.value.tickHz;
-  profileHash = hashPocketIdfHostProfile(validated.value);
-  registry = pocketIdfHostRegistry(validated.value);
+  profileHash = hostPlatform === "aic"
+    ? hashPocketAicHostProfile(validated.value)
+    : hashPocketIdfHostProfile(validated.value);
+  registry = hostPlatform === "aic"
+    ? pocketAicHostRegistry(validated.value)
+    : pocketIdfHostRegistry(validated.value);
 }
 const resolution = validateAndResolveBuildPlan(
   manifestInput,
   {
     target,
-    ...(profileHash ? { hostExtension: pocketIdfHostExtension(profileHash, tickHz) } : {}),
+    ...(profileHash && hostPlatform
+      ? {
+          hostExtension: hostPlatform === "aic"
+            ? pocketAicHostExtension(profileHash, tickHz)
+            : pocketIdfHostExtension(profileHash, tickHz),
+        }
+      : {}),
   },
   registry,
 );
@@ -195,7 +224,7 @@ if (hostProfileOption) {
     manifest: new Uint8Array(readFileSync(manifestPath)),
     variants: [variant],
   }));
-  console.log(`✓ ESP-IDF package ${output}`);
+  console.log(`✓ ${hostPlatform === "aic" ? "ArtInChip" : "ESP-IDF"} package ${output}`);
   process.exit(0);
 }
 

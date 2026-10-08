@@ -1,0 +1,43 @@
+# hosts/aic/rust — the `pocketjs-aic` staticlib every ArtInChip luban-lite
+# firmware links. STANDALONE CRATE (same model as hosts/esp-idf/native):
+# it lives outside the desktop workspace with its own Cargo.lock because the
+# luban-lite SCons build invokes cargo for the riscv32imafc-unknown-none-elf
+# target and the firmware must build without depending on the desktop
+# toolchain state.
+#
+# The crate re-exports the ESP-IDF native crates unchanged. They are pure
+# no_std C ABI wrappers over engine/core and engine/backends/rgb565 with no
+# ESP-IDF dependency; "idf" in their names records where they came from.
+# One archive means one copy of pocketjs-core, so the two-archive symbol
+# namespacing the ESP-IDF CMake build needs does not apply here.
+#
+# Build (riscv32imafc-unknown-none-elf is ilp32f hard-float, matching the
+# luban-lite E907F `-march=rv32imafc -mabi=ilp32f` objects):
+#   cargo build --release --locked --no-default-features \
+#     --manifest-path $POCKETJS_ROOT/hosts/aic/rust/Cargo.toml \
+#     --target riscv32imafc-unknown-none-elf
+[package]
+name = "pocketjs-aic"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+pocketjs-idf-abi = { path = "../../esp-idf/native/abi", default-features = false }
+pocketjs-idf-runtime = { path = "../../esp-idf/native/runtime", default-features = false }
+pocketjs-idf-ui-core = { path = "../../esp-idf/native/ui-core", default-features = false }
+pocketjs-idf-render-rgb565 = { path = "../../esp-idf/native/render-rgb565", default-features = false }
+
+[profile.release]
+codegen-units = 1
+debug = false
+opt-level = "s"
+overflow-checks = false
+panic = "abort"
+strip = true
+
+[workspace]

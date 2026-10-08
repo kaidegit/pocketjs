@@ -209,6 +209,7 @@ void pocketjs_guest_config_defaults(pocketjs_guest_config_t *config) {
       .heap_limit = CONFIG_POCKETJS_GUEST_HEAP_LIMIT,
       .stack_limit = 256U * 1024U,
       .prefer_psram = true,
+      .gc_threshold = 0U,
   };
 }
 
@@ -235,6 +236,9 @@ esp_err_t pocketjs_guest_create(const pocketjs_guest_config_t *config,
   }
   JS_SetMemoryLimit(guest->runtime, config->heap_limit);
   JS_SetMaxStackSize(guest->runtime, config->stack_limit);
+  if (config->gc_threshold != 0U) {
+    JS_SetGCThreshold(guest->runtime, config->gc_threshold);
+  }
   JS_SetRuntimeInfo(guest->runtime, "PocketJS ESP-IDF guest");
   JS_SetInterruptHandler(guest->runtime, guest_interrupt, guest);
   JS_SetHostPromiseRejectionTracker(guest->runtime, promise_rejection, guest);
@@ -422,6 +426,13 @@ void pocketjs_guest_interrupt(pocketjs_guest_t *guest) {
     (void)atomic_fetch_add_explicit(&guest->interrupt_epoch, 1U,
                                     memory_order_relaxed);
   }
+}
+
+void pocketjs_guest_run_gc(pocketjs_guest_t *guest) {
+  if (guest == NULL || guest->runtime == NULL) {
+    return;
+  }
+  JS_RunGC(guest->runtime);
 }
 
 esp_err_t pocketjs_guest_stats(pocketjs_guest_t *guest,

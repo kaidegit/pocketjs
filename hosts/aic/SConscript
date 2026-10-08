@@ -1,0 +1,147 @@
+# hosts/aic/SConscript — the one file a luban-lite application includes to
+# embed PocketJS: builds the `pocketjs-aic` Rust staticlib with cargo, adds
+# the portable ESP-IDF component sources, the RT-Thread port layer, and the
+# vendored QuickJS.
+#
+#   application/rt-thread/<app>/SConscript:
+#     Import('RTT_ROOT')
+#     Import('rtconfig')
+#     from building import *
+#     group = DefineGroup('Applications', ['main.c'], CPPPATH=[GetCurrentDir()])
+#     group = group + SConscript(os.path.join(POCKETJS_ROOT, 'hosts', 'aic',
+#                                             'SConscript'))
+#     Return('group')
+#
+# POCKETJS_ROOT points at the PocketJS checkout; tools/aic.ts sets it and the
+# application's Kconfig option CONFIG_POCKETJS_ROOT can too.
+#
+# The contract header generated/pocketjs_aic_contract.h pins the firmware to
+# one host profile; tools/aic.ts package writes it next to the .pocket file.
+
+import os
+import subprocess
+import sys
+from building import *
+
+cwd = GetCurrentDir()
+# The luban-lite root carries the baremetal TLSF allocator that the
+# private JS pool reuses; AIC_ROOT is exported by the SConstruct.
+Import('AIC_ROOT')
+tlsf_dir = os.path.join(AIC_ROOT, 'bsp', 'artinchip', 'include', 'drv_bare')
+tlsf_src = os.path.join(AIC_ROOT, 'bsp', 'artinchip', 'drv_bare',
+                        'tlsf_heap', 'tlsf.c')
+if not os.path.isfile(tlsf_src):
+    print('pocketjs: %s is missing' % tlsf_src)
+    raise FileNotFoundError(tlsf_src)
+root = os.path.normpath(os.path.join(cwd, '..', '..'))
+rust_dir = os.path.join(cwd, 'rust')
+rust_target = 'riscv32imafc-unknown-none-elf'
+rust_lib = os.path.join(rust_dir, 'target', rust_target, 'release',
+                        'libpocketjs_aic.a')
+qjs_dir = os.path.join(cwd, 'third_party', 'quickjs-ng')
+components_dir = os.path.join(root, 'hosts', 'esp-idf', 'components')
+generated_dir = os.path.join(cwd, 'generated')
+
+contract_header = os.path.join(generated_dir, 'pocketjs_aic_contract.h')
+embedded_package = os.path.join(generated_dir, 'pocket_bin.c')
+for required in (contract_header, embedded_package):
+    if not os.path.isfile(required):
+        print('pocketjs: %s is missing; run "bun tools/aic.ts package" first'
+              % required)
+        raise FileNotFoundError(required)
+
+if not GetOption('clean'):
+    toolchain = 'nightly-2026-05-28'
+    for line in open(os.path.join(rust_dir, 'rust-toolchain.toml')):
+        line = line.strip()
+        if line.startswith('channel'):
+            toolchain = line.split('=', 1)[1].strip().strip('"')
+    cargo_env = os.environ.copy()
+    cargo_env['RUSTUP_TOOLCHAIN'] = toolchain
+    command = [
+        'cargo', 'build', '--release', '--locked', '--no-default-features',
+        '--target', rust_target,
+        '-Z', 'build-std=core,alloc,compiler_builtins',
+        '--manifest-path', os.path.join(rust_dir, 'Cargo.toml'),
+    ]
+    print('pocketjs: ' + ' '.join(command))
+    subprocess.check_call(command, cwd=rust_dir, env=cargo_env)
+
+# The immutable-buffer preparation only depends on the vendored quickjs.c, so
+# regenerating when the prepared copy is older stays exact and cheap.
+prepared_dir = os.path.join(cwd, 'build')
+prepared_quickjs = os.path.join(prepared_dir, 'quickjs.c')
+source_quickjs = os.path.join(qjs_dir, 'quickjs.c')
+prepare_py = os.path.join(cwd, 'port', 'prepare_quickjs.py')
+if not GetOption('clean') and (
+        not os.path.isfile(prepared_quickjs)
+        or os.path.getmtime(source_quickjs) > os.path.getmtime(prepared_quickjs)):
+    os.makedirs(prepared_dir, exist_ok=True)
+    subprocess.check_call([sys.executable, prepare_py, source_quickjs,
+                           prepared_quickjs])
+
+objs = []
+
+# The RT-Thread port layer and the reused portable components. The component
+# headers include "esp_err.h", "esp_log.h" and "esp_heap_caps.h"; the
+# esp_compat directory maps them onto RT-Thread.
+port_src = [
+    os.path.join(cwd, 'port', 'pocketjs_host.c'),
+    os.path.join(cwd, 'port', 'pocketjs_display.c'),
+    os.path.join(cwd, 'port', 'pocketjs_touch.c'),
+    os.path.join(cwd, 'port', 'pocketjs_heap.c'),
+    embedded_package,
+    tlsf_src,
+]
+component_src = [
+    os.path.join(components_dir, 'pocketjs_package', 'src', 'package.c'),
+    os.path.join(components_dir, 'pocketjs_guest', 'src', 'guest.c'),
+    os.path.join(components_dir, 'pocketjs_ui_core', 'src', 'ui_core.c'),
+    os.path.join(components_dir, 'pocketjs_ui_qjs', 'src', 'ui_qjs.c'),
+    os.path.join(components_dir, 'pocketjs_render_rgb565', 'src',
+                 'render_rgb565.c'),
+]
+component_cpppath = [
+    os.path.join(components_dir, 'pocketjs_package', 'include'),
+    os.path.join(components_dir, 'pocketjs_guest', 'include'),
+    os.path.join(components_dir, 'pocketjs_ui_core', 'include'),
+    os.path.join(components_dir, 'pocketjs_ui_qjs', 'include'),
+    os.path.join(components_dir, 'pocketjs_render_rgb565', 'include'),
+    os.path.join(cwd, 'port'),
+    os.path.join(cwd, 'port', 'esp_compat'),
+    tlsf_dir,
+    generated_dir,
+    qjs_dir,
+]
+
+objs.extend(DefineGroup('PocketJSPort', port_src + component_src,
+                        depend=[''], CPPPATH=component_cpppath,
+                        LOCAL_CFLAGS=' -DCONFIG_POCKETJS_GUEST_HEAP_LIMIT='
+                                     '4194304 -D_GNU_SOURCE'))
+
+# QuickJS: the restricted-POSIX profile quickjs-ng ships for WASI keeps
+# console and file helpers while dropping exec/worker/dl/termios, which is the
+# surface the RT-Thread DFS layer can back. port/stub.c carries the weak
+# signal/nanosleep/dl stubs the espressif port adds.
+qjs_src = [
+    prepared_quickjs,
+    os.path.join(qjs_dir, 'dtoa.c'),
+    os.path.join(qjs_dir, 'libregexp.c'),
+    os.path.join(qjs_dir, 'libunicode.c'),
+    os.path.join(qjs_dir, 'quickjs-libc.c'),
+    os.path.join(cwd, 'third_party', 'port', 'stub.c'),
+]
+objs.extend(DefineGroup('PocketJSQuickJS', qjs_src, depend=[''],
+                        CPPPATH=[qjs_dir],
+                        LOCAL_CFLAGS=' -D__wasi__ -DQUICKJS_NG_BUILD '
+                                     '-include ' + os.path.join(cwd, 'third_party', 'port', 'shim.h') +
+                                     ' -O2'))
+
+# The Rust archive rides in LIBS so the SConstruct's whole-archive link line
+# pulls it; --gc-sections drops what the firmware never calls.
+objs.extend(DefineGroup('PocketJSRust', [], depend=[''],
+                        CPPPATH=[], LIBS=['pocketjs_aic', 'm'],
+                        LIBPATH=[os.path.join(rust_dir, 'target', rust_target,
+                                              'release')]))
+
+Return('objs')

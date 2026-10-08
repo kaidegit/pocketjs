@@ -1,5 +1,12 @@
 #!/usr/bin/env bun
 import { readIdfHostExtension } from "../framework/src/manifest/idf-host.ts";
+import { readAicHostExtension } from "../framework/src/manifest/aic-host.ts";
+import type { HostExtension } from "../framework/src/manifest/host-extension.ts";
+
+/** Host profiles agree on the payload shape; the kind names the platform. */
+function readHostTickExtension(extension: HostExtension | undefined) {
+  return readIdfHostExtension(extension) ?? readAicHostExtension(extension);
+}
 
 // `.pocket` packaging (docs/PLATFORM.md L2; format in contracts/spec/pocket-package.ts).
 //
@@ -88,20 +95,20 @@ export function makeVariant(input: {
     { kind: POCKET_SECTION.pak, bytes: input.pak },
   ];
   if (input.cover) sections.push({ kind: POCKET_SECTION.cover, bytes: input.cover });
-  const idfHost = readIdfHostExtension(plan.hostExtension);
-  if (idfHost) {
+  const hostTick = readHostTickExtension(plan.hostExtension);
+  if (hostTick) {
     sections.push({
       kind: POCKET_SECTION.hostInputs,
       bytes: encodeHostInputs({
         hostAbi: input.hostAbi,
-        tickHz: idfHost.tickHz,
+        tickHz: hostTick.tickHz,
         logicalWidth: plan.viewport.logical[0],
         logicalHeight: plan.viewport.logical[1],
         physicalWidth: plan.viewport.physical[0],
         physicalHeight: plan.viewport.physical[1],
         rasterDensity: plan.viewport.rasterDensity,
         presentation: plan.viewport.presentation,
-        profileHash: idfHost.profileHash,
+        profileHash: hostTick.profileHash,
         planHash: plan.planHash,
       }),
     });
@@ -281,19 +288,19 @@ function verifyCommand(file: string): void {
     let expectedPlan: ResolvedBuildPlan;
     if (hostInputs) {
       const planBytes = findSection(v, POCKET_SECTION.plan);
-      if (!planBytes) throw new Error(`verify: ESP-IDF variant ${v.target} has no plan`);
+      if (!planBytes) throw new Error(`verify: host-profile variant ${v.target} has no plan`);
       const plan = JSON.parse(new TextDecoder().decode(planBytes)) as ResolvedBuildPlan;
-      const idfHost = readIdfHostExtension(plan.hostExtension);
-      if (!verifyPlanHash(plan) || plan.target.id !== v.target || plan.target.hostAbi !== v.hostAbi || !idfHost) {
-        throw new Error(`verify: ESP-IDF variant ${v.target} has inconsistent plan identity`);
+      const hostTick = readHostTickExtension(plan.hostExtension);
+      if (!verifyPlanHash(plan) || plan.target.id !== v.target || plan.target.hostAbi !== v.hostAbi || !hostTick) {
+        throw new Error(`verify: host-profile variant ${v.target} has inconsistent plan identity`);
       }
       const inputs = decodeHostInputs(hostInputs);
-      if (inputs.hostAbi !== v.hostAbi || inputs.tickHz !== idfHost.tickHz ||
+      if (inputs.hostAbi !== v.hostAbi || inputs.tickHz !== hostTick.tickHz ||
         inputs.logicalWidth !== plan.viewport.logical[0] || inputs.logicalHeight !== plan.viewport.logical[1] ||
         inputs.physicalWidth !== plan.viewport.physical[0] || inputs.physicalHeight !== plan.viewport.physical[1] ||
         inputs.rasterDensity !== plan.viewport.rasterDensity || inputs.presentation !== plan.viewport.presentation ||
-        inputs.profileHash !== idfHost.profileHash || inputs.planHash !== plan.planHash) {
-        throw new Error(`verify: ESP-IDF variant ${v.target} host inputs drifted`);
+        inputs.profileHash !== hostTick.profileHash || inputs.planHash !== plan.planHash) {
+        throw new Error(`verify: host-profile variant ${v.target} host inputs drifted`);
       }
       expectedPlan = plan;
     } else {
