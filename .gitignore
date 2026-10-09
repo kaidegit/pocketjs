@@ -49,3 +49,6 @@ hosts/ios-nativescript/package-lock.json
 tools/bench-desktop/tauri/src-tauri/gen/
 
 hosts/web/pocket_text.wasm
+
+# object files left behind by editor/plugins building single files
+*.o
