@@ -24,15 +24,9 @@ import sys
 from building import *
 
 cwd = GetCurrentDir()
-# The luban-lite root carries the baremetal TLSF allocator that the
-# private JS pool reuses; AIC_ROOT is exported by the SConstruct.
-Import('AIC_ROOT')
-tlsf_dir = os.path.join(AIC_ROOT, 'bsp', 'artinchip', 'include', 'drv_bare')
-tlsf_src = os.path.join(AIC_ROOT, 'bsp', 'artinchip', 'drv_bare',
-                        'tlsf_heap', 'tlsf.c')
-if not os.path.isfile(tlsf_src):
-    print('pocketjs: %s is missing' % tlsf_src)
-    raise FileNotFoundError(tlsf_src)
+# The system heap itself is TLSF (SDK bsp/artinchip/drv/mem/rt_tlsf_heap.c,
+# RT_USING_USERHEAP); this port allocates straight from it and no longer
+# compiles a private pool.
 root = os.path.normpath(os.path.join(cwd, '..', '..'))
 rust_dir = os.path.join(cwd, 'rust')
 rust_target = 'riscv32imafc-unknown-none-elf'
@@ -91,7 +85,6 @@ port_src = [
     os.path.join(cwd, 'port', 'pocketjs_touch.c'),
     os.path.join(cwd, 'port', 'pocketjs_heap.c'),
     embedded_package,
-    tlsf_src,
 ]
 component_src = [
     os.path.join(components_dir, 'pocketjs_package', 'src', 'package.c'),
@@ -109,15 +102,18 @@ component_cpppath = [
     os.path.join(components_dir, 'pocketjs_render_rgb565', 'include'),
     os.path.join(cwd, 'port'),
     os.path.join(cwd, 'port', 'esp_compat'),
-    tlsf_dir,
     generated_dir,
     qjs_dir,
 ]
 
+# The guest heap limit is a soft cap under JS_SetMemoryLimit; the unified
+# TLSF system heap (PSRAM_SW, 0x700000 on demo68-nor) also carries the host
+# task stack (384 KiB) and the kernel/driver working set, so leave ~2 MiB
+# of headroom outside the guest quota.
 objs.extend(DefineGroup('PocketJSPort', port_src + component_src,
                         depend=[''], CPPPATH=component_cpppath,
                         LOCAL_CFLAGS=' -DCONFIG_POCKETJS_GUEST_HEAP_LIMIT='
-                                     '4194304 -D_GNU_SOURCE'))
+                                     '5242880 -D_GNU_SOURCE'))
 
 # QuickJS: the restricted-POSIX profile quickjs-ng ships for WASI keeps
 # console and file helpers while dropping exec/worker/dl/termios, which is the

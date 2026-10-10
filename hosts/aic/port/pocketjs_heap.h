@@ -3,12 +3,11 @@
 
 #include <rtthread.h>
 
-/** Claim the private pool for every heap_caps allocation. Call once from the
- * init thread before the guest task starts; idempotent. On failure the
- * heap_caps calls fall back to the system heap. */
+/** No-op kept for startup-order stability: allocations go straight to the
+ * unified TLSF system heap (RT_USING_USERHEAP), no pool is claimed. */
 void pocketjs_heap_init(void);
 
-/** Usage of the private pool when it is active, of the system heap when not. */
+/** Usage of the unified system heap. */
 void pocketjs_heap_stats(rt_size_t *total, rt_size_t *used,
                          rt_size_t *max_used);
 

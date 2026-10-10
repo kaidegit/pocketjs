@@ -336,7 +336,7 @@ static void pocketjs_aic_task(void *opaque) {
                  (unsigned)touch_count, (unsigned)rt_tick_get());
       rt_size_t pool_total = 0U, pool_used = 0U, pool_max = 0U;
       pocketjs_heap_stats(&pool_total, &pool_used, &pool_max);
-      rt_kprintf("[PocketJS] js_heap=%u/%u js_pool=%u/%u max=%u\n",
+      rt_kprintf("[PocketJS] js_heap=%u/%u sys_heap=%u/%u max=%u\n",
                  (unsigned)failed_stats.heap_used, (unsigned)failed_stats.heap_limit,
                  (unsigned)pool_used, (unsigned)pool_total, (unsigned)pool_max);
       exit_code = -1;
@@ -412,7 +412,7 @@ static void pocketjs_aic_task(void *opaque) {
       pocketjs_heap_stats(&pool_total, &pool_used, &pool_max);
       const uint32_t reports = pocketjs_aic_touch_report_count(state.touch);
       rt_kprintf("[PocketJS] turn_max=%u ms touch_reports=%u "
-                 "js_pool=%u/%u max=%u\n",
+                 "sys_heap=%u/%u max=%u\n",
                  (unsigned)(turn_ticks_max * 1000U / RT_TICK_PER_SECOND),
                  (unsigned)(reports - touch_reports),
                  (unsigned)pool_used, (unsigned)pool_total,
@@ -464,6 +464,10 @@ cleanup:
 
 static int pocketjs_aic_start(void) {
   pocketjs_heap_init();
+  rt_size_t heap_total = 0U, heap_used = 0U, heap_max = 0U;
+  pocketjs_heap_stats(&heap_total, &heap_used, &heap_max);
+  rt_kprintf("[PocketJS] heap: unified TLSF system heap, %u bytes total\n",
+             (unsigned)heap_total);
   rt_thread_t task = rt_thread_create("pocketjs", pocketjs_aic_task, RT_NULL,
                                       POCKETJS_TASK_STACK_BYTES,
                                       POCKETJS_TASK_PRIORITY, 10U);
