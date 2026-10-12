@@ -84,6 +84,7 @@ port_src = [
     os.path.join(cwd, 'port', 'pocketjs_display.c'),
     os.path.join(cwd, 'port', 'pocketjs_touch.c'),
     os.path.join(cwd, 'port', 'pocketjs_heap.c'),
+    os.path.join(cwd, 'port', 'pocketjs_diag.c'),
     embedded_package,
 ]
 component_src = [
@@ -110,10 +111,19 @@ component_cpppath = [
 # TLSF system heap (PSRAM_SW, 0x700000 on demo68-nor) also carries the host
 # task stack (384 KiB) and the kernel/driver working set, so leave ~2 MiB
 # of headroom outside the guest quota.
+#
+# P0 memory diagnostics (staged S0..S5 sampling, allocator accounting, the
+# pjs_mem console command) are on by default; POCKETJS_DIAG=0 in the
+# environment compiles them out. tools/aic.ts spawns scons with the invoking
+# environment merged in, so the variable passes straight through.
+diag_flags = ''
+if os.environ.get('POCKETJS_DIAG', '1') != '0':
+    diag_flags = ' -DPOCKETJS_AIC_DIAG -DCONFIG_POCKETJS_GUEST_ALLOC_STATS'
+
 objs.extend(DefineGroup('PocketJSPort', port_src + component_src,
                         depend=[''], CPPPATH=component_cpppath,
                         LOCAL_CFLAGS=' -DCONFIG_POCKETJS_GUEST_HEAP_LIMIT='
-                                     '5242880 -D_GNU_SOURCE'))
+                                     '5242880 -D_GNU_SOURCE' + diag_flags))
 
 # QuickJS: the restricted-POSIX profile quickjs-ng ships for WASI keeps
 # console and file helpers while dropping exec/worker/dl/termios, which is the

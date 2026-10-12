@@ -23,6 +23,7 @@
 #include "pocketjs/ui_qjs.h"
 
 #include "pocketjs_aic_contract.h"
+#include "pocketjs_diag.h"
 #include "pocketjs_display.h"
 #include "pocketjs_heap.h"
 #include "pocketjs_touch.h"
@@ -120,6 +121,23 @@ static void pocketjs_print_stats(uint32_t frames_in_second,
              guest_stats != RT_NULL ? (unsigned)guest_stats->heap_limit : 0U);
 }
 
+/* S3/S4 boundary of the staged eval: one sample right after the compile-only
+ * pass, one after the function executed and the frame surface resolved. The
+ * EXECUTING notice only relabels the failure stage, so allocations failing
+ * during the mount carry the execute-stage label, not the compile one. */
+static void pocketjs_eval_stage_cb(pocketjs_guest_t *guest,
+                                   pocketjs_guest_eval_stage_t stage,
+                                   esp_err_t result, void *user) {
+  (void)user;
+  (void)result;
+  if (stage == POCKETJS_GUEST_EVAL_EXECUTING) {
+    pocketjs_heap_diag_set_stage("S4-mount");
+    return;
+  }
+  pocketjs_diag_sample(
+      stage == POCKETJS_GUEST_EVAL_COMPILED ? "S3-compile" : "S4-mount", guest);
+}
+
 static void pocketjs_aic_task(void *opaque) {
   struct pocketjs_aic_state state;
   uint8_t *package_bytes = RT_NULL;
@@ -129,6 +147,8 @@ static void pocketjs_aic_task(void *opaque) {
   int exit_code = 0;
 
   rt_memset(&state, 0, sizeof(state));
+
+  pocketjs_diag_sample("S0-task", RT_NULL);
 
   state.display = pocketjs_aic_display_open();
   if (state.display == RT_NULL) {
@@ -155,8 +175,12 @@ static void pocketjs_aic_task(void *opaque) {
     goto cleanup;
   }
 
+  pocketjs_diag_sample("S1-display", RT_NULL);
+
   state.touch = pocketjs_aic_touch_open(AIC_TOUCH_PANEL_NAME);
   pocketjs_aic_touch_range(state.touch, &state.touch_range_x, &state.touch_range_y);
+
+  pocketjs_diag_sample("S1-touch", RT_NULL);
 
   if (pocketjs_aic_source.path != RT_NULL) {
     if (pocketjs_load_package(pocketjs_aic_source.path, &package_bytes,
@@ -195,6 +219,8 @@ static void pocketjs_aic_task(void *opaque) {
     goto cleanup;
   }
 
+  pocketjs_diag_sample("S2-package", RT_NULL);
+
   pocketjs_guest_config_t guest_config;
   pocketjs_guest_config_defaults(&guest_config);
   guest_config.stack_limit = 256U * 1024U;
@@ -207,6 +233,8 @@ static void pocketjs_aic_task(void *opaque) {
     exit_code = -1;
     goto cleanup;
   }
+
+  pocketjs_diag_sample("S2-guest", state.guest);
 
   pocketjs_ui_core_config_t core_config;
   pocketjs_ui_core_config_defaults(&core_config);
@@ -237,10 +265,19 @@ static void pocketjs_aic_task(void *opaque) {
     exit_code = -1;
     goto cleanup;
   }
-  if (pocketjs_guest_eval(state.guest, (const char *)variant.javascript.data,
-                          variant.javascript.size - 1U,
-                          POCKETJS_AIC_CONTRACT_TARGET_ID) != ESP_OK) {
+
+  pocketjs_diag_sample("S2-uibind", state.guest);
+
+  /* The staged call compiles once and executes once, with the S3/S4 samples
+   * in between; with diagnostics compiled out the callback is a no-op and
+   * the behavior matches the fused pocketjs_guest_eval. */
+  if (pocketjs_guest_eval_stages(state.guest,
+                                 (const char *)variant.javascript.data,
+                                 variant.javascript.size - 1U,
+                                 POCKETJS_AIC_CONTRACT_TARGET_ID,
+                                 pocketjs_eval_stage_cb, RT_NULL) != ESP_OK) {
     rt_kprintf("[PocketJS] guest: bundle eval failed\n");
+    pocketjs_diag_dump();
     exit_code = -1;
     goto cleanup;
   }
@@ -260,10 +297,13 @@ static void pocketjs_aic_task(void *opaque) {
   rt_memset(display_info.buffers[0], 0, display_info.buffer_size);
   rt_memset(display_info.buffers[1], 0, display_info.buffer_size);
 
+  pocketjs_diag_sample("S5-renderer", state.guest);
+
   const uint32_t tick_hz = POCKETJS_AIC_CONTRACT_TICK_HZ;
   const rt_tick_t frame_ticks = rt_tick_from_millisecond(1000U / tick_hz);
   rt_tick_t next_frame = rt_tick_get();
   uint32_t frames = 0U;
+  uint32_t frames_total = 0U;
   rt_tick_t stats_deadline = rt_tick_get() + rt_tick_from_millisecond(1000U);
   uint32_t touch_reports = 0U;
   rt_tick_t gc_deadline = rt_tick_get() + rt_tick_from_millisecond(2000U);
@@ -276,6 +316,12 @@ static void pocketjs_aic_task(void *opaque) {
   while (1) {
     if (pocketjs_aic_tick_reached(rt_tick_get(), next_frame)) {
       next_frame += frame_ticks;
+    }
+
+    /* Console-requested samples (pjs_mem) run here, on the guest task. */
+    char diag_label[POCKETJS_DIAG_LABEL_MAX];
+    if (pocketjs_diag_take_request(diag_label, sizeof(diag_label))) {
+      pocketjs_diag_sample(diag_label, state.guest);
     }
 
     pocketjs_ui_input_t input;
@@ -329,6 +375,7 @@ static void pocketjs_aic_task(void *opaque) {
     }
     if (turn != ESP_OK) {
       rt_kprintf("[PocketJS] guest: turn failed (%d), stopping\n", (int)turn);
+      pocketjs_diag_sample("turn-failed", state.guest);
       pocketjs_guest_stats_t failed_stats = {.struct_size = sizeof(failed_stats)};
       pocketjs_guest_stats(state.guest, &failed_stats);
       rt_kprintf("[PocketJS] frames=%u errors=%u touches=%u tick=%u\n",
@@ -385,6 +432,12 @@ static void pocketjs_aic_task(void *opaque) {
     }
 
     frames++;
+    frames_total++;
+    if (frames_total == 1U) {
+      pocketjs_diag_sample("S5-frame1", state.guest);
+    } else if (frames_total == 120U) {
+      pocketjs_diag_sample("S5-frame120", state.guest);
+    }
     second_stats.software_ops += frame_stats.software_ops;
     second_stats.software_words += frame_stats.software_words;
     second_stats.damage_pixels += frame_stats.damage_pixels;
@@ -468,6 +521,7 @@ static int pocketjs_aic_start(void) {
   pocketjs_heap_stats(&heap_total, &heap_used, &heap_max);
   rt_kprintf("[PocketJS] heap: unified TLSF system heap, %u bytes total\n",
              (unsigned)heap_total);
+  pocketjs_diag_sample("S0-boot", RT_NULL);
   rt_thread_t task = rt_thread_create("pocketjs", pocketjs_aic_task, RT_NULL,
                                       POCKETJS_TASK_STACK_BYTES,
                                       POCKETJS_TASK_PRIORITY, 10U);

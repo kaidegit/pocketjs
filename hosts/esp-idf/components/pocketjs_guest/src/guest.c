@@ -48,6 +48,15 @@ struct pocketjs_guest {
   uint32_t frames;
   uint32_t frame_errors;
   uint32_t jobs;
+#ifdef CONFIG_POCKETJS_GUEST_ALLOC_STATS
+  size_t alloc_live;
+  size_t alloc_peak;
+  uint32_t allocs;
+  uint32_t frees;
+  uint32_t reallocs;
+  uint32_t realloc_shrinks;
+  size_t realloc_max;
+#endif
 };
 
 static void *guest_malloc(void *opaque, size_t size) {
@@ -66,6 +75,15 @@ static void *guest_malloc(void *opaque, size_t size) {
   if (header == NULL) {
     return NULL;
   }
+#ifdef CONFIG_POCKETJS_GUEST_ALLOC_STATS
+  if (guest != NULL) {
+    guest->alloc_live += total;
+    if (guest->alloc_live > guest->alloc_peak) {
+      guest->alloc_peak = guest->alloc_live;
+    }
+    guest->allocs++;
+  }
+#endif
   header->size = size;
   return header + 1;
 }
@@ -85,6 +103,15 @@ static void *guest_calloc(void *opaque, size_t count, size_t size) {
 static void guest_free(void *opaque, void *pointer) {
   (void)opaque;
   if (pointer != NULL) {
+#ifdef CONFIG_POCKETJS_GUEST_ALLOC_STATS
+    pocketjs_guest_t *guest = opaque;
+    if (guest != NULL) {
+      guest->alloc_live -=
+          sizeof(allocation_header_t) +
+          (((allocation_header_t *)pointer) - 1)->size;
+      guest->frees++;
+    }
+#endif
     heap_caps_free(((allocation_header_t *)pointer) - 1);
   }
 }
@@ -102,6 +129,20 @@ static void *guest_realloc(void *opaque, void *pointer, size_t size) {
     guest_free(opaque, pointer);
     return NULL;
   }
+#ifdef CONFIG_POCKETJS_GUEST_ALLOC_STATS
+  {
+    pocketjs_guest_t *guest = opaque;
+    if (guest != NULL) {
+      guest->reallocs++;
+      if (size < guest_usable_size(pointer)) {
+        guest->realloc_shrinks++;
+      }
+      if (size > guest->realloc_max) {
+        guest->realloc_max = size;
+      }
+    }
+  }
+#endif
   const size_t previous_size = guest_usable_size(pointer);
   void *next = guest_malloc(opaque, size);
   if (next == NULL) {
@@ -301,6 +342,19 @@ pocketjs_guest_quickjs_install_once(pocketjs_guest_t *guest, const char *name,
   return result;
 }
 
+/* Shared tail of the eval entry points: adopt the executed script's frame
+ * surface and drain the jobs its top level queued. */
+static esp_err_t guest_adopt_frame_and_drain(pocketjs_guest_t *guest) {
+  JS_FreeValue(guest->context, guest->frame);
+  JSValue global = JS_GetGlobalObject(guest->context);
+  guest->frame = JS_GetPropertyStr(guest->context, global, "frame");
+  JS_FreeValue(guest->context, global);
+  if (!JS_IsFunction(guest->context, guest->frame)) {
+    return ESP_ERR_NOT_FOUND;
+  }
+  return drain_jobs(guest);
+}
+
 esp_err_t pocketjs_guest_eval(pocketjs_guest_t *guest, const char *source,
                               size_t source_size, const char *label) {
   if (guest == NULL || guest->context == NULL || source == NULL ||
@@ -316,14 +370,50 @@ esp_err_t pocketjs_guest_eval(pocketjs_guest_t *guest, const char *source,
     return ESP_FAIL;
   }
   JS_FreeValue(guest->context, result);
-  JS_FreeValue(guest->context, guest->frame);
-  JSValue global = JS_GetGlobalObject(guest->context);
-  guest->frame = JS_GetPropertyStr(guest->context, global, "frame");
-  JS_FreeValue(guest->context, global);
-  if (!JS_IsFunction(guest->context, guest->frame)) {
-    return ESP_ERR_NOT_FOUND;
+  return guest_adopt_frame_and_drain(guest);
+}
+
+esp_err_t pocketjs_guest_eval_stages(pocketjs_guest_t *guest,
+                                     const char *source, size_t source_size,
+                                     const char *label,
+                                     pocketjs_guest_eval_stage_fn on_stage,
+                                     void *user) {
+  if (guest == NULL || guest->context == NULL || source == NULL ||
+      source_size == 0U) {
+    return ESP_ERR_INVALID_ARG;
   }
-  return drain_jobs(guest);
+  JSValue function =
+      JS_Eval(guest->context, source, source_size,
+              label != NULL ? label : "<pocket-app>",
+              JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
+  if (JS_IsException(function)) {
+    js_std_dump_error(guest->context);
+    JS_FreeValue(guest->context, function);
+    return ESP_FAIL;
+  }
+  if (on_stage != NULL) {
+    on_stage(guest, POCKETJS_GUEST_EVAL_COMPILED, ESP_OK, user);
+  }
+  if (on_stage != NULL) {
+    on_stage(guest, POCKETJS_GUEST_EVAL_EXECUTING, ESP_OK, user);
+  }
+  /* JS_EvalFunction consumes the function object (JS_CallFree semantics),
+   * owned from here on regardless of the outcome. */
+  JSValue result = JS_EvalFunction(guest->context, function);
+  if (JS_IsException(result)) {
+    js_std_dump_error(guest->context);
+    if (on_stage != NULL) {
+      on_stage(guest, POCKETJS_GUEST_EVAL_EXECUTED, ESP_FAIL, user);
+    }
+    JS_FreeValue(guest->context, result);
+    return ESP_FAIL;
+  }
+  JS_FreeValue(guest->context, result);
+  const esp_err_t finalize = guest_adopt_frame_and_drain(guest);
+  if (on_stage != NULL) {
+    on_stage(guest, POCKETJS_GUEST_EVAL_EXECUTED, finalize, user);
+  }
+  return finalize;
 }
 
 static JSValue make_u32_array(JSContext *context, const uint32_t *values,
@@ -453,6 +543,52 @@ esp_err_t pocketjs_guest_stats(pocketjs_guest_t *guest,
       .heap_limit = guest->heap_limit,
   };
   return ESP_OK;
+}
+
+esp_err_t pocketjs_guest_memstats(pocketjs_guest_t *guest,
+                                  pocketjs_guest_memstats_t *out_stats) {
+  if (guest == NULL || guest->runtime == NULL || out_stats == NULL ||
+      out_stats->struct_size < sizeof(*out_stats)) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  JSMemoryUsage usage = {0};
+  JS_ComputeMemoryUsage(guest->runtime, &usage);
+  const size_t output_size = out_stats->struct_size;
+  *out_stats = (pocketjs_guest_memstats_t){
+      .struct_size = output_size,
+      .malloc_size = (size_t)usage.malloc_size,
+      .malloc_limit = (size_t)usage.malloc_limit,
+      .malloc_count = (uint64_t)usage.malloc_count,
+      .atom_count = (uint64_t)usage.atom_count,
+      .str_count = (uint64_t)usage.str_count,
+      .obj_count = (uint64_t)usage.obj_count,
+      .shape_count = (uint64_t)usage.shape_count,
+      .prop_count = (uint64_t)usage.prop_count,
+      .js_func_code_size = (uint64_t)usage.js_func_code_size,
+  };
+  return ESP_OK;
+}
+
+void pocketjs_guest_allocstats(pocketjs_guest_t *guest,
+                               pocketjs_guest_allocstats_t *out_stats) {
+  if (out_stats == NULL) {
+    return;
+  }
+  const size_t output_size = out_stats->struct_size;
+  *out_stats = (pocketjs_guest_allocstats_t){.struct_size = output_size};
+#ifdef CONFIG_POCKETJS_GUEST_ALLOC_STATS
+  if (guest != NULL) {
+    out_stats->live = guest->alloc_live;
+    out_stats->peak = guest->alloc_peak;
+    out_stats->allocs = guest->allocs;
+    out_stats->frees = guest->frees;
+    out_stats->reallocs = guest->reallocs;
+    out_stats->realloc_shrinks = guest->realloc_shrinks;
+    out_stats->realloc_max = guest->realloc_max;
+  }
+#else
+  (void)guest;
+#endif
 }
 
 void pocketjs_guest_destroy(pocketjs_guest_t *guest) {
