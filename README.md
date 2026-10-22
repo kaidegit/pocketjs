@@ -36,7 +36,7 @@ projects build on:
 | --- | --- | --- |
 | **PocketJS** | The application runtime: TypeScript components, a QuickJS guest and a Rust core that lays out and draws every pixel | This README · [pocketjs.pocket.nexus](https://pocketjs.pocket.nexus) |
 | **Pocket3D** | A hardware-native 3D stack: device kernels for GXM, GE and PICA200, and the mechanisms that purpose-built 3D engines share | [`pocket3d/`](./pocket3d/README.md) · [3d.pocket.nexus](https://3d.pocket.nexus) |
-| **MicroTS** | An ahead-of-time compiler from TypeScript views and models to Rust, in development | [`microts/`](./microts/README.md) |
+| **MicroTS** | An ahead-of-time compiler from TypeScript views and models to Rust, in development | [`microts/`](./microts/README.md) · [microts.pocket.nexus](https://microts.pocket.nexus) |
 
 ## Contents
 
@@ -351,12 +351,13 @@ rustup target add wasm32-unknown-unknown
 bun run dev                    # build WASM + the Hero app, then serve the browser host
 ```
 
-The CLI operates inside a PocketJS checkout:
+The `pocket` CLI runs on Bun. The
+[CLI reference](https://pocketjs.pocket.nexus/docs/cli/) lists its commands,
+scaffolding options and target toolchains:
 
 ```sh
-npm install -g @pocketjs/cli
-pocket doctor                  # report missing host and target tooling
-pocket setup                   # install the pinned web + PSP toolchain
+bun add -g @pocketjs/cli       # or: npm install -g @pocketjs/cli
+pocket target add psp          # install the PSP toolchain the framework pins
 pocket create my-app
 pocket check --target psp --manifest apps/my-app/pocket.json
 pocket build --target psp --manifest apps/my-app/pocket.json -- --release
@@ -416,7 +417,7 @@ repository or the Rust AOT build.
 | [`tools/`](./tools/) | Build, package, launcher, device, DevTools, benchmark and release commands |
 | [`tests/`](./tests/) | Contract, compiler, simulation, emulator, package and golden verification |
 | [`docs/`](./docs/) | Platform, runtime, determinism, DevTools, backend and benchmark records |
-| [`site/`](./site/) | This website ([`site/nexus/`](./site/nexus/) holds the [pocket.nexus](https://pocket.nexus) homepage, [`site/pocket3d/`](./site/pocket3d/) the [3d.pocket.nexus](https://3d.pocket.nexus) homepage) |
+| [`site/`](./site/) | This website ([`site/nexus/`](./site/nexus/) holds the [pocket.nexus](https://pocket.nexus) homepage, [`site/pocket3d/`](./site/pocket3d/) the [3d.pocket.nexus](https://3d.pocket.nexus) homepage, [`site/microts/`](./site/microts/) the [microts.pocket.nexus](https://microts.pocket.nexus) docs and playground) |
 
 ### Building and testing
 

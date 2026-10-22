@@ -30,8 +30,8 @@ frozen at build time.
 4. Pass 2 (`Bun.build`) bundles the app, with the JSX plugin serving that
    generated module **from memory** — two target builds running at once cannot
    read each other's table. `tools/build.ts` writes
-   `framework/src/styles.generated.ts` as a mirror for inspection; the bundle
-   does not read that file from disk, and pass 1 skips it.
+   `<outdir>/<output>.styles.ts` as a copy for inspection; the bundle does not
+   read it, and nothing is written into the framework directory.
 
 `styles.bin` ships in the `.pak`. On PSP the native pak walker feeds it to the
 core; on the browser and headless Bun hosts it arrives through the `loadStyles`
@@ -299,7 +299,7 @@ token is a compile error.
 | Utility | Effect |
 |---|---|
 | `text-{color}` | text color |
-| `text-xs` \| `-sm` \| `-base` \| `-lg` \| `-xl` \| `-2xl` \| `-4xl` \| `-5xl` | 12 / 14 / 16 / 18 / 20 / 24 / 36 / 54 px |
+| `text-2xs` \| `-xs` \| `-sm` \| `-base` \| `-lg` \| `-xl` \| `-2xl` \| `-4xl` \| `-5xl` | 10 / 12 / 14 / 16 / 18 / 20 / 24 / 36 / 54 px |
 | `font-bold` | bold weight of the same size |
 | `font-mono` | JetBrains Mono at slots 16–18: sizes 12/14/16 only, regular weight only |
 | `text-left` \| `text-center` \| `text-right` | horizontal alignment |
@@ -308,7 +308,8 @@ token is a compile error.
 
 A text-size utility selects a **baked font-atlas slot**, not a free number:
 slots 0–6 are the regular sizes, 7–13 their bold pairs, 14/15 the 54px pair,
-16–18 monospace. There is no arbitrary font size. Text with no size or weight
+16–18 monospace, 19/20 the 10px pair (`text-2xs`, for labels under icons).
+There is no arbitrary font size. Text with no size or weight
 utility uses **16px regular**.
 
 `font-mono` overrides weight — `font-mono font-bold` lands on the mono slot for

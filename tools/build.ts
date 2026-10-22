@@ -32,7 +32,7 @@ import { BuildInputs } from "../framework/compiler/build-inputs.ts";
 //                                that does not compile; without it the build
 //                                prints the same finding as a warning
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { resolve as resolvePath, join, dirname } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { IMG_FLAG_LINEAR, PSM } from "../contracts/spec/spec.ts";
@@ -319,7 +319,16 @@ async function walk(file: string): Promise<void> {
   }
 }
 
+// System layers the plan's capabilities bring (framework/src/system-layers.ts):
+// a Solid app that declares "system.agent" gets the agent's overlay. It is
+// walked here so pass 1 compiles its classes and glyphs, and imported ahead
+// of the app's entry in pass 2 so it registers before the app mounts.
+const systemLayers: string[] = [];
+if (framework === "solid" && buildPlan?.features["system.agent"] === true) {
+  systemLayers.push(join(ROOT, "framework/src/agent-layer.tsx"));
+}
 await walk(entry);
+for (const layer of systemLayers) await walk(layer);
 console.log(`  pass 1: ${visited.size} module(s), ${classStrings.length} candidate literal(s), ${codepoints.size} codepoint(s)`);
 
 // ---------------------------------------------------------------------------
@@ -368,15 +377,16 @@ if (styles.records.length === 0) {
   for (const line of findings) console.warn(`  warning: ${line}`);
 }
 
-const generatedPath = join(ROOT, "framework/src/styles.generated.ts");
 const generatedStyles = generateStylesModule(styles);
-// Keep the ignored mirror for docs/site tooling and human inspection. Pass 2
-// receives this build's source directly through jsxPlugin, so concurrent
-// targets can never import another build's transient STYLE_IDS table.
+// Pass 2 receives this build's style table through jsxPlugin. The copy beside
+// the bundle is for inspection and for tools that bundle the framework with a
+// given table (the site's playground runtimes); nothing is written into the
+// framework directory.
+const generatedPath = `${DIST}${outName}.styles.ts`;
 await Bun.write(generatedPath, generatedStyles);
 console.log(
   `  tailwind: ${styles.records.length} style record(s), ${styles.anims.length} baked timeline(s), ` +
-    `${Object.keys(styles.ids).length} literal(s) -> framework/src/styles.generated.ts`,
+    `${Object.keys(styles.ids).length} literal(s) -> ${generatedPath}`,
 );
 
 // The font policy covers runtime data independently of source literals.
@@ -543,18 +553,18 @@ console.log(`  pak: ${blobs.length} entries, ${pak.length} bytes -> ${DIST}${out
 // pass 2 — bundle (served from the pass-1 cache)
 // ---------------------------------------------------------------------------
 
-// framework/src/renderer.ts is owned by the js-runtime phase; if it does not exist yet,
-// drop in the no-op placeholder so the bundle links (see docs/DESIGN.md).
-if (!existsSync(frameworkConfig.rendererPath)) {
-  await Bun.write(frameworkConfig.rendererPath, placeholderRenderer());
-  console.warn("  pass 2: renderer missing — wrote the no-op placeholder (js-runtime phase owns the real one)");
-}
-
 // jsxPlugin owns dependency identity as well as framework aliases. In
 // particular, external apps and renderer-solid.ts must share PocketJS's
 // browser-mode Solid runtime even when the app has its own node_modules.
+let bundleEntry = entry;
+if (systemLayers.length > 0) {
+  const entries = join(DIST, ".entries");
+  mkdirSync(entries, { recursive: true });
+  bundleEntry = join(entries, `${outName}.ts`);
+  writeFileSync(bundleEntry, [...systemLayers, entry].map((file) => `import ${JSON.stringify(file)};\n`).join(""));
+}
 const result = await Bun.build({
-  entrypoints: [entry],
+  entrypoints: [bundleEntry],
   root: process.cwd(),
   outdir: DIST,
   naming: `${outName}.js`,
@@ -605,58 +615,3 @@ if (inputsFile) {
 }
 console.log(`  pass 2: ${DIST}${outName}.js (${bundle ? (await bundle.arrayBuffer()).byteLength : 0} bytes)`);
 console.log("PocketJS build: done");
-
-// ---------------------------------------------------------------------------
-
-// Keep in sync with docs/DESIGN.md's universal-renderer surface. This is ONLY a
-// link-time stub for builds that run before the js-runtime phase lands.
-function placeholderRenderer(): string {
-  return `\
-// placeholder, impl:js-runtime owns this — written by tools/build.ts so
-// pass-2 bundling links before framework/src/renderer.ts is implemented. Every export
-// is the no-op shape of Solid's universal-renderer output (createRenderer).
-/* eslint-disable @typescript-eslint/no-unused-vars */
-
-type Node = { type?: string; text?: string; children: Node[]; props: Record<string, unknown> };
-
-const node = (type?: string, text?: string): Node => ({ type, text, children: [], props: {} });
-
-export function render(code: () => unknown, _root?: unknown): () => void {
-  code();
-  return () => {};
-}
-export function effect<T>(fn: (prev?: T) => T, init?: T): void {
-  fn(init);
-}
-export function memo<T>(fn: () => T): () => T {
-  return fn;
-}
-export function createComponent(Comp: (props: unknown) => unknown, props: unknown): unknown {
-  return Comp(props);
-}
-export function createElement(type: string): Node {
-  return node(type);
-}
-export function createTextNode(value: string): Node {
-  return node(undefined, value);
-}
-export function replaceText(n: Node, value: string): void {
-  n.text = value;
-}
-export function insertNode(parent: Node, n: Node, _anchor?: Node): void {
-  parent.children.push(n);
-}
-export function insert(_parent: Node, _accessor: unknown, _marker?: Node | null): void {}
-export function spread(_n: Node, _props: unknown, _skipChildren?: boolean): void {}
-export function setProp(n: Node, name: string, value: unknown, _prev?: unknown): unknown {
-  n.props[name] = value;
-  return value;
-}
-export function mergeProps(...sources: unknown[]): unknown {
-  return Object.assign({}, ...sources);
-}
-export function use(fn: (el: Node) => void, el: Node): void {
-  fn(el);
-}
-`;
-}
