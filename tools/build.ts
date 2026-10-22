@@ -1,3 +1,4 @@
+import { loadAppFeatures, filterFeatureResource, specializeAppSource } from "../framework/compiler/app-features.ts";
 import { resolveSolidAotModel } from "../microts/compiler/aot-solid-browser.ts";
 import { modelConfiguration } from "../microts/compiler/aot-model-build.ts";
 import { readIdfHostExtension } from "../framework/src/manifest/idf-host.ts";
@@ -18,6 +19,8 @@ import { BuildInputs } from "../framework/compiler/build-inputs.ts";
 //         minify false) -> dist/<app>.js.
 //
 // Flags:
+//   --app-features=<path>        application feature registry (paired with profile)
+//   --app-profile=<name>         explicit product feature profile
 //   --framework=solid|vue-vapor|octane  select the framework for this build
 //   --config=<path>              load a Pocket config file (default: pocket.config.ts)
 //   --no-config                  ignore pocket.config.ts
@@ -100,9 +103,13 @@ let hzFlag: number | undefined;
 let projectRoot = process.cwd();
 let inputsFile: string | undefined;
 let strictClasses = false;
+let appFeaturesFile: string | undefined;
+let appProfile: string | undefined;
 const buildInputs = new BuildInputs();
 for (const a of args) {
-  if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
+  if (a.startsWith("--app-features=")) appFeaturesFile = resolvePath(a.slice("--app-features=".length));
+  else if (a.startsWith("--app-profile=")) appProfile = a.slice("--app-profile=".length);
+  else if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
   else if (a.startsWith("--font-regular=")) regularFontPath = resolvePath(a.slice("--font-regular=".length));
   else if (a.startsWith("--font-bold=")) boldFontPath = resolvePath(a.slice("--font-bold=".length));
   else if (a.startsWith("--framework=")) frameworkFlag = a.slice("--framework=".length);
@@ -118,6 +125,19 @@ for (const a of args) {
   else if (!a.startsWith("-")) appArg = a;
 }
 
+if (Boolean(appFeaturesFile) !== Boolean(appProfile)) throw new Error("--app-features and --app-profile must be supplied together");
+const appFeatures = appFeaturesFile ? await loadAppFeatures(appFeaturesFile, appProfile!) : undefined;
+if (appFeatures) {
+  buildInputs.add(appFeatures.file);
+  for (const file of appFeatures.resources) {
+    buildInputs.add(file);
+    const collect = (v: unknown): void => {
+      if (typeof v === "string") extraChars += v;
+      else if (v && typeof v === "object") for (const child of Object.values(v)) collect(child);
+    };
+    collect(filterFeatureResource(await Bun.file(file).json(), appFeatures));
+  }
+}
 let buildPlan: ResolvedBuildPlan | undefined;
 if (planPath) {
   buildPlan = await Bun.file(planPath).json() as ResolvedBuildPlan;
@@ -292,6 +312,7 @@ const codepoints = new Set<number>();
 const visited = new Set<string>();
 
 async function walk(file: string): Promise<void> {
+  if (appFeatures?.disabledModules.has(file)) throw new Error(`disabled feature module is still reachable: ${file}`);
   if (visited.has(file)) return;
   visited.add(file);
   // Never scan the compiled-styles module: its literals ARE the compiled
@@ -303,7 +324,7 @@ async function walk(file: string): Promise<void> {
   const src = await Bun.file(file).text();
   buildInputs.add(file);
   // Throws with a code frame on lint errors.
-  const res = await transformFile(file, src, framework, { features: buildPlan?.features, entry });
+  const res = await transformFile(file, src, framework, { features: buildPlan?.features, entry, appFeatures });
   for (const s of res.classStrings) {
     if (!seenClass.has(s)) {
       seenClass.add(s);
@@ -313,7 +334,8 @@ async function walk(file: string): Promise<void> {
   for (const cp of res.textCodepoints) codepoints.add(cp);
   // The framework's own modules are not the app author's to fix.
   if (!file.startsWith(ROOT + "/framework/")) for (const site of res.literalSites) literalSites.push({ file, site });
-  for (const spec of importSpecifiers(src)) {
+  const graphSource = appFeatures ? await specializeAppSource(file, src, appFeatures) : src;
+  for (const spec of importSpecifiers(graphSource)) {
     const dep = resolveImport(file, spec);
     if (dep) await walk(dep);
   }
@@ -598,6 +620,7 @@ const result = await Bun.build({
   plugins: [jsxPlugin(framework, {
     entry,
     features: buildPlan?.features,
+    appFeatures,
     generatedStyles,
   })],
 });
@@ -608,6 +631,7 @@ if (!result.success) {
 }
 const bundle = result.outputs.find((o) => o.path.endsWith(".js"));
 if (inputsFile) {
+  if (appFeatures) for (const file of appFeatures.excluded) buildInputs.add(file);
   buildInputs.metafile(result.metafile);
   await buildInputs.compiler([join(ROOT, "tools/build.ts"), join(ROOT, "tools/pocket.ts"),
     ...(useConfig && existsSync(configPath) ? [configPath] : [])], ROOT);
@@ -615,3 +639,16 @@ if (inputsFile) {
 }
 console.log(`  pass 2: ${DIST}${outName}.js (${bundle ? (await bundle.arrayBuffer()).byteLength : 0} bytes)`);
 console.log("PocketJS build: done");
+
+if (appFeatures) {
+  for (const file of appFeatures.excluded) buildInputs.add(file);
+  const receipt = {
+    version: 1, profile: appFeatures.profile, fingerprint: appFeatures.fingerprint,
+    values: appFeatures.values, modules: [...visited].sort(), excludedModules: [...appFeatures.excluded].sort(),
+    omittedKeys: appFeatures.omittedKeys, codepoints: codepoints.size,
+    jsBytes: bundle ? (await bundle.arrayBuffer()).byteLength : 0, pakBytes: pak.length,
+    metafile: result.metafile,
+  };
+  await Bun.write(join(DIST, `${outName}.features.json`), JSON.stringify(receipt, null, 2) + "\n");
+  console.log(`  app features: ${appFeatures.profile} ${appFeatures.fingerprint.slice(0, 16)}, excluded ${appFeatures.excluded.size} module(s)`);
+}

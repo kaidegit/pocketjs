@@ -1,3 +1,4 @@
+import { loadAppFeatures } from "../framework/compiler/app-features.ts";
 // Manifest-driven PocketJS orchestration.
 //
 //   bun pocket check --target psp
@@ -54,7 +55,7 @@ function usage(message?: string): never {
   console.error(
     "usage: bun pocket <check|compile|build> (--target <target> | --host-profile <pocket.host.json>) " +
       "[--manifest pocket.json] [--project-root .] [--outdir dist] [--plan-dir .pocket] " +
-      "[--output app.pocket] [-- backend args]",
+      "[--output app.pocket] [--app-features features.json --app-profile name] [-- backend args]",
   );
   process.exit(1);
 }
@@ -122,6 +123,10 @@ const planRoot = resolve(projectRoot, takeOption("plan-dir") ?? ".pocket");
 const outputOption = takeOption("output");
 const depfileOption = takeOption("depfile");
 const compilerReceipt = takeOption("compiler-receipt");
+const appFeaturesFile = takeOption("app-features");
+const appProfile = takeOption("app-profile");
+if (Boolean(appFeaturesFile) !== Boolean(appProfile)) usage("--app-features and --app-profile must be supplied together");
+if (appFeaturesFile) await loadAppFeatures(resolve(projectRoot, appFeaturesFile), appProfile!);
 if (depfileOption && (!hostProfileOption || command !== "build")) usage("--depfile requires build --host-profile");
 if (compilerReceipt && !existsSync(resolve(compilerReceipt))) usage("compiler receipt does not exist");
 if (outputOption && (!hostProfileOption || command !== "build")) {
@@ -282,6 +287,7 @@ await run(
     `--project-root=${projectRoot}`,
     `--outdir=${outdir}`,
     `--hz=${tickHz}`,
+    ...(appFeaturesFile ? [`--app-features=${resolve(projectRoot, appFeaturesFile)}`, `--app-profile=${appProfile}`] : []),
     ...(depfileOption ? [`--inputs-file=${resolve(outdir, `${plan.app.output}.inputs.json`)}`] : []),
   ],
   "PocketJS compiler",

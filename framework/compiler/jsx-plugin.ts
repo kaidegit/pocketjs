@@ -1,3 +1,4 @@
+import { specializeAppSource, filterFeatureResource, type AppFeatures } from "./app-features.ts";
 // Framework-aware pass-1 Babel transform + AST collection.
 
 import { transformAsync, type PluginObj } from "@babel/core";
@@ -531,7 +532,7 @@ export async function transformFile(
   path: string,
   src: string,
   framework: PocketFramework,
-  options: { features?: BuildFeatures; entry?: string } = {},
+  options: { features?: BuildFeatures; entry?: string; appFeatures?: AppFeatures } = {},
 ): Promise<TransformResult> {
   const isVueSfc = path.endsWith(".vue");
   if (isVueSfc && framework !== "vue-vapor") {
@@ -544,12 +545,13 @@ export async function transformFile(
   // hash, so admission precedes the cache lookup on browser and guest builds.
   if (isVueSfc && hasVueAotContract(src, path)) checkVueAotSource(src, path);
   const written = src;
+  if (options.appFeatures) src = await specializeAppSource(path, src, options.appFeatures);
   const solidAot = framework === "solid" && path.endsWith(".tsx") ? getSolidAotProgram(path, src, options.entry) : undefined;
   if (solidAot) src = normalizeSolidAotSemantics(src, path, solidAot);
   src = transformCompiledModel(src, path, options.entry) ?? src;
   // A lowering above rewrote the text, so the collector's positions are not the file's.
   const positionsHold = src === written;
-  const key = await hashKey(path, src, framework, options.features);
+  const key = await hashKey(path, src + (options.appFeatures?.fingerprint ?? ""), framework, options.features);
   const cacheFile = CACHE_DIR + key + ".json";
   const cached = (await Bun.file(cacheFile).json().catch(() => null)) as CacheEntry | null;
   // SFC output also depends on imported props and declaration modules. Their
@@ -684,6 +686,7 @@ export function jsxPlugin(
   opts: {
     entry?: string;
     features?: BuildFeatures;
+    appFeatures?: AppFeatures;
     generatedStyles?: string;
   } = {},
 ): BunPlugin {
@@ -691,6 +694,13 @@ export function jsxPlugin(
     name: `pocketjs-${framework}-jsx`,
     setup(build) {
       const declarationMocks = new Map<string, string>();
+      if (opts.appFeatures) {
+        const features = opts.appFeatures;
+        build.onLoad({ filter: /\.json$/ }, async args => {
+          if (!features.resources.includes(args.path)) return undefined;
+          return { contents: JSON.stringify(filterFeatureResource(await Bun.file(args.path).json(), features)), loader: "json" };
+        });
+      }
       // External applications may have their own node_modules. Resolve both
       // sides of the renderer boundary to PocketJS's browser-mode Solid copy,
       // otherwise identical packages at different paths form two reactive
@@ -791,12 +801,12 @@ export function jsxPlugin(
         if (framework === "vue-vapor" && args.path === opts.entry) {
           src = `import "@pocketjs/framework/prelude";\n${src}`;
         }
-        const { code } = await transformFile(args.path, src, framework, { features: opts.features, entry: opts.entry });
+        const { code } = await transformFile(args.path, src, framework, { features: opts.features, entry: opts.entry, appFeatures: opts.appFeatures });
         return { contents: code, loader: "js" };
       });
       build.onLoad({ filter: /\.vue$/ }, async (args) => {
         const src = await Bun.file(args.path).text();
-        const { code } = await transformFile(args.path, src, framework, { features: opts.features, entry: opts.entry });
+        const { code } = await transformFile(args.path, src, framework, { features: opts.features, entry: opts.entry, appFeatures: opts.appFeatures });
         return { contents: code, loader: "js" };
       });
     },
