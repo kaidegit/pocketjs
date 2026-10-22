@@ -17,6 +17,7 @@ import { IPHONE2G_DEV_CONTRACTS, IPHONE2G_DEV_TARGET_ID } from "../iphone2g-prof
 import { IPHONE4S_DEV_CONTRACTS, IPHONE4S_DEV_TARGET_ID } from "../iphone4s-profile.ts";
 import { IPODTOUCH_DEV_CONTRACTS, IPODTOUCH_DEV_TARGET_ID } from "../ipodtouch-profile.ts";
 import { IPODTOUCH4_DEV_CONTRACTS, IPODTOUCH4_DEV_TARGET_ID } from "../ipodtouch4-profile.ts";
+import { MACOS_GPUI_CONTRACTS } from "../macos-gpui-profile.ts";
 import pspToolchain from "./psp.toolchain.json";
 import { TOOLCHAIN_SCHEMA, type ToolchainManifest } from "./toolchain.ts";
 import { HOST_IDS, type HostId, type TargetDescriptor } from "./types.ts";
@@ -64,6 +65,7 @@ export const CATALOG: readonly TargetDescriptor[] = [
   registered("pocketbook", "PocketBook e-reader"),
   registered("web-app", "Browser", HOST_IDS, compilerOnly("web-app")),
   registered("macos-app", "macOS app", MACOS, compilerOnly("macos-app")),
+  profile("macos-gpui", "macOS GPUI app (PocketCOM)", "macos-app", MACOS_GPUI_CONTRACTS, MACOS),
   registered("linux-app", "Linux app", LINUX, compilerOnly("linux-app")),
   registered("macos-widget", "macOS widget", MACOS, compilerOnly("macos-widget")),
   profile("moto-g-play", "Moto G Play (Android)", MOTO_G_PLAY_TARGET, MOTO_G_PLAY_CONTRACTS, ANDROID_NDK),
