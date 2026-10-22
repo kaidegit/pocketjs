@@ -6,13 +6,21 @@ and `tools/build.ts`. Both flags must be supplied together. Existing builds with
 keep their existing pipeline.
 
 A version 1 JSON registry supplies `module` (the application's feature import specifier),
-`features` (definitions with optional `requires`, `modules`, `i18n`), `profiles` (an explicit boolean
-for every feature in every profile), and optional `resources` (JSON dictionaries). Paths are relative
+`features` (definitions with optional `status`, `requires`, `modules`, `i18n`), `profiles` (an explicit boolean
+for every implemented feature in every profile), and optional `resources` (JSON dictionaries). Paths are relative
 to the registry. Unknown fields/features, missing values, nonboolean flags, broken dependencies/cycles,
 overlapping ownership, and missing resource keys fail the build.
 
-Applications declare the type of `hasAppFeature(name: keyof Registry["features"]): boolean` in an
-ambient module matching `module`, with a tsconfig paths mapping for entry-based type checks. There
+`status` is `implemented` (the compatibility default when omitted) or `planned`. It describes
+integration with compile-time pruning, not whether the product functionality itself exists.
+Planned entries reserve names in the one catalog; they cannot appear in profiles with either
+boolean, own `modules`/`i18n`, or be referenced by `hasAppFeature()`. Implemented features cannot
+depend on planned ones. Dependency-name and cycle validation still covers the entire catalog.
+Promote an entry only after its actual pruning paths and tests have been integrated. Keep feature
+names/states/values in this registry rather than duplicating them in code or documentation.
+
+Applications declare the type of `hasAppFeature(name: keyof Profiles[keyof Profiles]): boolean` in an
+ambient module matching `module`, deriving `Profiles` from the registry profiles, with a tsconfig paths mapping for entry-based type checks. There
 is no guest runtime feature registry. Named imports, including aliases, are recognized by binding;
 only direct calls with literal names are accepted. A local function with the same name is unaffected.
 Do not pass the feature function as a value or use namespace imports/computed feature names.
@@ -37,6 +45,6 @@ sources, not from removed modules. Explicit extra chars and other static resourc
 this is not a blanket unused-image/font-slot eliminator.
 
 The host ResolvedBuildPlan schema/hash is unchanged. Product configuration identity is recorded
-separately in `<output>.features.json` with values, modules/excluded modules, omitted keys,
+separately in `<output>.features.json` with the catalog/status and effective values, modules/excluded modules, omitted keys,
 codepoint count, JS/PAK bytes and Bun metafile. Config/resource/excluded-module files enter compiler
 dependency records. Choose separate output directories when producing different product profiles.

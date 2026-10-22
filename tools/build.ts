@@ -644,7 +644,7 @@ if (appFeatures) {
   for (const file of appFeatures.excluded) buildInputs.add(file);
   const receipt = {
     version: 1, profile: appFeatures.profile, fingerprint: appFeatures.fingerprint,
-    values: appFeatures.values, modules: [...visited].sort(), excludedModules: [...appFeatures.excluded].sort(),
+    values: appFeatures.values, catalog: appFeatures.definitions, modules: [...visited].sort(), excludedModules: [...appFeatures.excluded].sort(),
     omittedKeys: appFeatures.omittedKeys, codepoints: codepoints.size,
     jsBytes: bundle ? (await bundle.arrayBuffer()).byteLength : 0, pakBytes: pak.length,
     metafile: result.metafile,

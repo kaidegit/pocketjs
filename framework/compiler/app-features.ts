@@ -3,7 +3,7 @@ import { transformAsync, type PluginObj } from "@babel/core";
 import { realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-interface Feature { requires?: string[]; modules?: string[]; i18n?: string[] }
+interface Feature { status?: "implemented" | "planned"; requires?: string[]; modules?: string[]; i18n?: string[] }
 export interface AppFeatures {
   file: string;
   root: string;
@@ -31,20 +31,31 @@ export async function loadAppFeatures(file: string, profile: string): Promise<Ap
   }
   const names = Object.keys(raw.features).sort();
   for (const [name, definition] of Object.entries(raw.features)) {
-    if (!record(definition) || Object.keys(definition).some(k => !["requires", "modules", "i18n"].includes(k))) {
+    if (!record(definition) || Object.keys(definition).some(k => !["status", "requires", "modules", "i18n"].includes(k))) {
       throw new Error(`invalid feature definition: ${name}`);
     }
+    if (definition.status !== undefined && !["implemented", "planned"].includes(definition.status))
+      throw new Error(`invalid feature status: ${name}`);
+    if (definition.status === "planned" && (definition.modules !== undefined || definition.i18n !== undefined))
+      throw new Error(`planned feature cannot own modules or resources: ${name}`);
     for (const field of ["requires", "modules", "i18n"]) {
       if (definition[field] !== undefined && (!Array.isArray(definition[field]) ||
         !definition[field].every((x: unknown) => typeof x === "string"))) throw new Error(`invalid ${name}.${field}`);
     }
     for (const dep of definition.requires ?? []) if (!names.includes(dep)) throw new Error(`unknown dependency: ${dep}`);
   }
+  const implemented = names.filter(name => raw.features[name].status !== "planned");
+  for (const name of implemented) for (const dep of raw.features[name].requires ?? []) {
+    if (raw.features[dep].status === "planned") throw new Error(`${name} requires planned feature ${dep}`);
+  }
   // Validate every profile, so a newly added feature cannot leave old targets ambiguous.
   for (const [name, flags] of Object.entries(raw.profiles)) {
-    if (!record(flags) || JSON.stringify(Object.keys(flags).sort()) !== JSON.stringify(names) ||
+    if (record(flags)) for (const feature of Object.keys(flags)) {
+      if (raw.features[feature]?.status === "planned") throw new Error(`planned feature cannot be configured in profile ${name}: ${feature}`);
+    }
+    if (!record(flags) || JSON.stringify(Object.keys(flags).sort()) !== JSON.stringify(implemented) ||
       !Object.values(flags).every(v => typeof v === "boolean")) throw new Error(`incomplete/unknown feature in profile ${name}`);
-    for (const feature of names) if (flags[feature]) {
+    for (const feature of implemented) if (flags[feature]) {
       for (const dep of raw.features[feature].requires ?? []) if (!flags[dep]) throw new Error(`${name}: ${feature} requires ${dep}`);
     }
   }
@@ -62,7 +73,7 @@ export async function loadAppFeatures(file: string, profile: string): Promise<Ap
     !raw.resources.every((v: unknown) => typeof v === "string"))) throw new Error("invalid feature resources");
   const root = dirname(realpathSync(file));
   const owners = new Set<string>(), keys = new Set<string>(), disabledModules = new Set<string>(), omittedKeys: string[] = [];
-  for (const name of names) {
+  for (const name of implemented) {
     for (const path of raw.features[name].modules ?? []) {
       const absolute = resolve(root, path);
       if (owners.has(absolute)) throw new Error(`feature module has multiple owners: ${path}`);
@@ -116,6 +127,7 @@ function folder(features: AppFeatures): PluginObj {
       if ((imported.type === "Identifier" ? imported.name : imported.value) !== "hasAppFeature") return;
       const arg = path.node.arguments[0];
       if (path.node.arguments.length !== 1 || arg?.type !== "StringLiteral") throw path.buildCodeFrameError("hasAppFeature requires one literal feature name");
+      if (features.definitions[arg.value]?.status === "planned") throw path.buildCodeFrameError(`app feature is only planned, not integrated: ${arg.value}`);
       if (!Object.hasOwn(features.values, arg.value)) throw path.buildCodeFrameError(`unknown app feature: ${arg.value}`);
       path.replaceWith({ type: "BooleanLiteral", value: features.values[arg.value]! });
     }});
