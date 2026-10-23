@@ -25,6 +25,7 @@
 #include "pocketjs_aic_contract.h"
 #include "pocketjs_diag.h"
 #include "pocketjs_display.h"
+#include "pocketjs_ge.h"
 #include "pocketjs_heap.h"
 #include "pocketjs_touch.h"
 #include "pocketjs_time.h"
@@ -36,6 +37,7 @@
 struct pocketjs_aic_state {
   struct pocketjs_aic_display *display;
   struct pocketjs_aic_touch *touch;
+  struct pocketjs_aic_ge *ge;
   pocketjs_guest_t *guest;
   pocketjs_ui_core_t *core;
   pocketjs_ui_qjs_t *binding;
@@ -112,11 +114,15 @@ static void pocketjs_fill_contract(pocketjs_package_host_contract_t *contract) {
 static void pocketjs_print_stats(uint32_t frames_in_second,
                                  pocketjs_rgb565_render_stats_t *stats,
                                  const pocketjs_guest_stats_t *guest_stats) {
-  rt_kprintf("[PocketJS] fps=%u damage=%u px=%u full=%u js_heap=%u/%u\n",
+  rt_kprintf("[PocketJS] fps=%u damage=%u px=%u full=%u ge_fill=%u ge_blend=%u"
+             " ge_srm=%u js_heap=%u/%u\n",
              (unsigned)frames_in_second,
              (unsigned)stats->damage_regions,
              (unsigned)stats->damage_pixels,
              (unsigned)stats->full_redraw,
+             (unsigned)stats->ppa_fills,
+             (unsigned)stats->ppa_blends,
+             (unsigned)stats->ppa_srm,
              guest_stats != RT_NULL ? (unsigned)guest_stats->heap_used : 0U,
              guest_stats != RT_NULL ? (unsigned)guest_stats->heap_limit : 0U);
 }
@@ -282,6 +288,13 @@ static void pocketjs_aic_task(void *opaque) {
     goto cleanup;
   }
 
+  /* The GE accelerator is an optimization: an open failure keeps the
+   * accelerator table NULL and the CPU rasterizer handles every pixel. */
+  state.ge = pocketjs_aic_ge_open();
+  if (state.ge == RT_NULL) {
+    rt_kprintf("[PocketJS] ge: out of memory; CPU rendering only\n");
+  }
+
   pocketjs_rgb565_renderer_config_t renderer_config;
   pocketjs_rgb565_renderer_config_defaults(&renderer_config);
   renderer_config.scale = POCKETJS_AIC_CONTRACT_RASTER_DENSITY;
@@ -409,8 +422,12 @@ static void pocketjs_aic_task(void *opaque) {
         rt_memset(&region_stats, 0, sizeof(region_stats));
         region_stats.struct_size = sizeof(region_stats);
         render = pocketjs_rgb565_render_strip(state.renderer, &frame, strip,
-                                              strip_pixels, region, RT_NULL,
+                                              strip_pixels, region,
+                                              pocketjs_aic_ge_accelerator(state.ge),
                                               &region_stats);
+        frame_stats.ppa_fills += region_stats.ppa_fills;
+        frame_stats.ppa_blends += region_stats.ppa_blends;
+        frame_stats.ppa_srm += region_stats.ppa_srm;
         frame_stats.software_ops += region_stats.software_ops;
         frame_stats.software_words += region_stats.software_words;
         frame_stats.damage_pixels += region_stats.damage_pixels;
@@ -438,6 +455,9 @@ static void pocketjs_aic_task(void *opaque) {
     } else if (frames_total == 120U) {
       pocketjs_diag_sample("S5-frame120", state.guest);
     }
+    second_stats.ppa_fills += frame_stats.ppa_fills;
+    second_stats.ppa_blends += frame_stats.ppa_blends;
+    second_stats.ppa_srm += frame_stats.ppa_srm;
     second_stats.software_ops += frame_stats.software_ops;
     second_stats.software_words += frame_stats.software_words;
     second_stats.damage_pixels += frame_stats.damage_pixels;
@@ -496,6 +516,7 @@ cleanup:
   if (state.renderer != RT_NULL) {
     pocketjs_rgb565_renderer_destroy(state.renderer);
   }
+  pocketjs_aic_ge_close(state.ge);
   if (state.binding != RT_NULL) {
     pocketjs_ui_qjs_destroy(state.binding);
   }

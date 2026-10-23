@@ -5,10 +5,12 @@ This directory hosts PocketJS guests on ArtInChip SoCs running luban-lite.
 keeps its `main.c` and references this checkout through `POCKETJS_ROOT`; no
 application code programs the display or the touch panel.
 
-The D12x (T-Head E907F, `rv32imafc` with the `ilp32f` ABI) renders purely in
-software: the RGB565 backend in `engine/backends/rgb565` rasterizes damage
-rectangles on the CPU, and the aicfb display engine scans the result. The 2D
-engine (GE) stays unused.
+The D12x (T-Head E907F, `rv32imafc` with the `ilp32f` ABI) renders through
+the RGB565 backend in `engine/backends/rgb565`, and the port offloads that
+backend's accelerator hooks onto the SoC's 2D engine (GE): solid fills and
+1:1 PSM 5650 blits run as GE fillrect/bitblt while glyphs, alpha quads,
+gradients, and anything GE rejects stay on the CPU rasterizer, which keeps
+the DrawList order. The aicfb display engine scans the result.
 
 ## How a frame reaches the panel
 
@@ -21,8 +23,9 @@ aic-d12x-demo68.pocket ── generated/pocket_bin.c ── d12x_os.itb (rodata)
         ▼
 port/pocketjs_host.c    one guest: QuickJS realm, pak, frame loop
         │  pocketjs_ui_turn ── retained core ── DrawList words
-        │  pocketjs_rgb565_prepare/render_strip/commit ── CPU raster into the
-        │  non-scanned aicfb buffer, one strip per damage rectangle
+        │  pocketjs_rgb565_prepare/render_strip/commit ── GE fillrect/bitblt
+        │  for fills and 1:1 PSM 5650 blits, CPU raster for the rest, one
+        │  strip per damage rectangle into the non-scanned aicfb buffer
         ▼
 aicfb PAN_DISPLAY + WAIT_FOR_VSYNC
 ```
@@ -38,6 +41,7 @@ changes repaint the whole buffer; a static screen reaches `damage=0`.
 | `rust/` | The `pocketjs-aic` staticlib: one archive with the four ESP-IDF native crates, one copy of `pocketjs-core`, the software renderer, and the `pocketjs_native_*` C ABI |
 | `port/pocketjs_host.c` | Package load, guest mount, input, render, present, frame pacing |
 | `port/pocketjs_display.c` | `mpp_fb` open, screen info, `PAN_DISPLAY`, `WAIT_FOR_VSYNC`, cache maintenance |
+| `port/pocketjs_ge.c` | `mpp_ge` accelerator: GE fillrect for solid fills, GE bitblt (source declared `BGR_565`) for 1:1 PSM 5650 blits; clean/invalidate around each DMA; every failure returns false so the renderer replays the op on the CPU |
 | `port/pocketjs_touch.c` | Touch device binding, active contact snapshots, panel-range coordinates |
 | `port/pocketjs_time.h` | Tick deadline comparisons and frame waits across the 32-bit tick wrap |
 | `port/pocketjs_heap.c` | `heap_caps_*` inside a private TLSF pool, with the offset-slot alignment the reused components need |
@@ -109,8 +113,22 @@ compiled-in contract, so a stale package linked into the firmware fails
 admission instead of rendering with the wrong assumptions.
 
 The guest bundle evaluates against the `pocketjs_native_ui_*` core and the
-`pocketjs_native_renderer_*` software rasterizer; the accelerator argument
-stays null, so every rectangle, blend, and blit runs on the CPU.
+`pocketjs_native_renderer_*` rasterizer. `port/pocketjs_ge.c` supplies the
+accelerator table: `fill_rgb565` runs as one GE fillrect (the constant color
+travels as the ARGB8888 fill source), `srm_psm5650_to_rgb565` runs as one GE
+bitblt whose source is declared `MPP_FMT_BGR_565` because PSM 5650 stores R
+and B opposite to the framebuffer's RGB565, and `blend_a8_rgb565` stays NULL
+because GE has no alpha-only source format — glyph masks and alpha quads keep
+the CPU path. GE runs in normal mode (`RT_USING_PM` disables cmdq), so each
+ioctl blocks until the finish IRQ; the destination rows are cache-cleaned
+before the DMA and invalidated after it, which keeps the synchronous PpaOps
+contract while CPU software ops interleave within one frame. Requests GE
+cannot serve — rotation, rescaling, out-of-range geometry — and every GE
+error return false, and the renderer replays the operation in software in
+DrawList order. `POCKETJS_GE=0` in the build environment compiles the engine
+use out (`-DPOCKETJS_AIC_GE_DISABLE`) and the accelerator table stays NULL,
+matching the pre-GE firmware; the per-second log line reports the split as
+`ge_fill=… ge_blend=… ge_srm=…`.
 
 ## Verification
 
@@ -126,7 +144,12 @@ stays null, so every rectangle, blend, and blit runs on the CPU.
 - The full scons build of `d12x_demo68-nor_rt-thread_pocketjs` and the size
   report against the 3072 KB `os` partition.
 - On the board: the serial line `[PocketJS] fps=… damage=… px=… full=…
-  js_heap=…/…` once per second, the demo UI, and touch moving the count.
+  ge_fill=… ge_blend=… ge_srm=… js_heap=…/…` once per second, the demo UI,
+  and touch moving the count.
+- `bun test tests/aic-port.test.ts` compiles `port/pocketjs_ge.c` against
+  the recorded `mpp_ge` stub in `tests/include/ge/mpp_ge.h`, both with and
+  without `-DPOCKETJS_AIC_GE_DISABLE`, and checks the argument mapping, the
+  clean → GE → invalidate ordering, and the fallback behavior.
 
 ## Limits
 
@@ -137,6 +160,9 @@ stays null, so every rectangle, blend, and blit runs on the CPU.
   path first.
 - `CONFIG_DATA_ORDER_BGR` decides the byte order the display engine reads;
   if red and blue swap on the panel, fix that config, not the renderer.
+- GE offload is verified against the host-side `mpp_ge` stub; the BGR_565
+  source swap and the fill colors still need on-panel confirmation. A build
+  with `POCKETJS_GE=0` reproduces the pre-GE firmware for A/B checks.
 - The os partition is 3072 KB; the firmware plus the embedded Hero package
   takes about 2660 KB of it. A package larger than the remaining headroom
   needs the `os` partition widened again or an external load path. The

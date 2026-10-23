@@ -82,6 +82,7 @@ objs = []
 port_src = [
     os.path.join(cwd, 'port', 'pocketjs_host.c'),
     os.path.join(cwd, 'port', 'pocketjs_display.c'),
+    os.path.join(cwd, 'port', 'pocketjs_ge.c'),
     os.path.join(cwd, 'port', 'pocketjs_touch.c'),
     os.path.join(cwd, 'port', 'pocketjs_heap.c'),
     os.path.join(cwd, 'port', 'pocketjs_diag.c'),
@@ -120,10 +121,17 @@ diag_flags = ''
 if os.environ.get('POCKETJS_DIAG', '1') != '0':
     diag_flags = ' -DPOCKETJS_AIC_DIAG -DCONFIG_POCKETJS_GUEST_ALLOC_STATS'
 
+# POCKETJS_GE=0 compiles the GE accelerator out; the accelerator table stays
+# NULL and every pixel comes from the CPU rasterizer (the pre-GE behavior).
+ge_flags = ''
+if os.environ.get('POCKETJS_GE', '1') == '0':
+    ge_flags = ' -DPOCKETJS_AIC_GE_DISABLE'
+
 objs.extend(DefineGroup('PocketJSPort', port_src + component_src,
                         depend=[''], CPPPATH=component_cpppath,
                         LOCAL_CFLAGS=' -DCONFIG_POCKETJS_GUEST_HEAP_LIMIT='
-                                     '5242880 -D_GNU_SOURCE' + diag_flags))
+                                     '5242880 -D_GNU_SOURCE' + diag_flags
+                                     + ge_flags))
 
 # QuickJS: the restricted-POSIX profile quickjs-ng ships for WASI keeps
 # console and file helpers while dropping exec/worker/dl/termios, which is the
