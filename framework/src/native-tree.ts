@@ -124,189 +124,197 @@ function setDomAttribute(node: NodeMirror, name: string, value: unknown): void {
   else domAttrs(node)[name] = value;
 }
 
-export function decorateNativeNode(node: NodeMirror): NodeMirror {
-  if ((node as unknown as Record<symbol, unknown>)[DOM_NODE] === true) return node;
-  Object.defineProperty(node, DOM_NODE, { value: true });
-  Object.defineProperties(node, {
-    nodeType: {
-      configurable: true,
-      get() {
-        return node.domNodeType ?? (isTextNode(node) ? DOM_TEXT : DOM_ELEMENT);
-      },
+// Vue's DOM-shaped helpers call these through their receiver. Share the
+// functions across mirrors instead of capturing each node in accessors and
+// methods; the mutable attribute/style/classList containers remain per node.
+const nativeNodePrototype = Object.defineProperties({}, {
+  nodeType: {
+    configurable: true,
+    get(this: NodeMirror) {
+      return this.domNodeType ?? (isTextNode(this) ? DOM_TEXT : DOM_ELEMENT);
     },
-    nodeValue: {
-      configurable: true,
-      get() {
-        return node.domNodeType === DOM_COMMENT ? node.domData ?? "" : node.text ?? "";
-      },
-      set(value: unknown) {
-        if (node.domNodeType === DOM_COMMENT) node.domData = String(value ?? "");
-        else replaceText(node, String(value ?? ""));
-      },
+  },
+  nodeValue: {
+    configurable: true,
+    get(this: NodeMirror) {
+      return this.domNodeType === DOM_COMMENT ? this.domData ?? "" : this.text ?? "";
     },
-    data: {
-      configurable: true,
-      get() {
-        return node.domNodeType === DOM_COMMENT ? node.domData ?? "" : node.text ?? "";
-      },
-      set(value: unknown) {
-        if (node.domNodeType === DOM_COMMENT) node.domData = String(value ?? "");
-        else replaceText(node, String(value ?? ""));
-      },
+    set(this: NodeMirror, value: unknown) {
+      if (this.domNodeType === DOM_COMMENT) this.domData = String(value ?? "");
+      else replaceText(this, String(value ?? ""));
     },
-    textContent: {
-      configurable: true,
-      get() {
-        if (node.domNodeType === DOM_COMMENT) return node.domData ?? "";
-        if (isTextNode(node)) return node.text ?? "";
-        return node.children.map((child) => child.text ?? "").join("");
-      },
-      set(value: unknown) {
-        const text = String(value ?? "");
-        if (node.domNodeType === DOM_COMMENT) {
-          node.domData = text;
-        } else if (isTextNode(node)) {
-          replaceText(node, text);
-        } else {
-          clearContainer(node);
-          if (text) insertNode(node, createTextNode(text));
-        }
-      },
+  },
+  data: {
+    configurable: true,
+    get(this: NodeMirror) {
+      return this.domNodeType === DOM_COMMENT ? this.domData ?? "" : this.text ?? "";
     },
-    parentNode: {
-      configurable: true,
-      get() {
-        return node.parent;
-      },
+    set(this: NodeMirror, value: unknown) {
+      if (this.domNodeType === DOM_COMMENT) this.domData = String(value ?? "");
+      else replaceText(this, String(value ?? ""));
     },
-    parentElement: {
-      configurable: true,
-      get() {
-        return node.parent;
-      },
+  },
+  textContent: {
+    configurable: true,
+    get(this: NodeMirror) {
+      if (this.domNodeType === DOM_COMMENT) return this.domData ?? "";
+      if (isTextNode(this)) return this.text ?? "";
+      return this.children.map((child) => child.text ?? "").join("");
     },
-    childNodes: {
-      configurable: true,
-      get() {
-        return node.children;
-      },
+    set(this: NodeMirror, value: unknown) {
+      const text = String(value ?? "");
+      if (this.domNodeType === DOM_COMMENT) {
+        this.domData = text;
+      } else if (isTextNode(this)) {
+        replaceText(this, text);
+      } else {
+        clearContainer(this);
+        if (text) insertNode(this, createTextNode(text));
+      }
     },
-    firstChild: {
-      configurable: true,
-      get() {
-        return node.children[0] ?? null;
-      },
+  },
+  parentNode: {
+    configurable: true,
+    get(this: NodeMirror) {
+      return this.parent;
     },
-    lastChild: {
-      configurable: true,
-      get() {
-        return node.children[node.children.length - 1] ?? null;
-      },
+  },
+  parentElement: {
+    configurable: true,
+    get(this: NodeMirror) {
+      return this.parent;
     },
-    nextSibling: {
-      configurable: true,
-      get() {
-        return getNextSibling(node) ?? null;
-      },
+  },
+  childNodes: {
+    configurable: true,
+    get(this: NodeMirror) {
+      return this.children;
     },
-    previousSibling: {
-      configurable: true,
-      get() {
-        const parent = node.parent;
-        if (!parent) return null;
-        const index = parent.children.indexOf(node);
-        return index > 0 ? parent.children[index - 1] : null;
-      },
+  },
+  firstChild: {
+    configurable: true,
+    get(this: NodeMirror) {
+      return this.children[0] ?? null;
     },
-    tagName: {
-      configurable: true,
-      get() {
-        return (node.domTag ?? tagName(node)).toUpperCase();
-      },
+  },
+  lastChild: {
+    configurable: true,
+    get(this: NodeMirror) {
+      return this.children[this.children.length - 1] ?? null;
     },
-    nodeName: {
-      configurable: true,
-      get() {
-        if (node.domNodeType === DOM_TEXT) return "#text";
-        if (node.domNodeType === DOM_COMMENT) return "#comment";
-        return (node.domTag ?? tagName(node)).toUpperCase();
-      },
+  },
+  nextSibling: {
+    configurable: true,
+    get(this: NodeMirror) {
+      return getNextSibling(this) ?? null;
     },
-    className: {
-      configurable: true,
-      get() {
-        return String(node.domAttrs?.class ?? "");
-      },
-      set(value: unknown) {
-        setProp(node, "class", value, node.domAttrs?.class);
-      },
+  },
+  previousSibling: {
+    configurable: true,
+    get(this: NodeMirror) {
+      const parent = this.parent;
+      if (!parent) return null;
+      const index = parent.children.indexOf(this);
+      return index > 0 ? parent.children[index - 1] : null;
     },
-    isConnected: {
-      configurable: true,
-      get() {
-        let current: NodeMirror | null = node;
-        while (current) {
-          if (nativeRoots.has(current)) return true;
-          current = current.parent;
-        }
-        return false;
-      },
+  },
+  tagName: {
+    configurable: true,
+    get(this: NodeMirror) {
+      return (this.domTag ?? tagName(this)).toUpperCase();
     },
-  });
-  const methods = {
-    appendChild(child: NodeMirror) {
-      insertNode(node, child);
-      return child;
+  },
+  nodeName: {
+    configurable: true,
+    get(this: NodeMirror) {
+      if (this.domNodeType === DOM_TEXT) return "#text";
+      if (this.domNodeType === DOM_COMMENT) return "#comment";
+      return (this.domTag ?? tagName(this)).toUpperCase();
     },
-    insertBefore(child: NodeMirror, anchor?: NodeMirror | null) {
-      insertNode(node, child, anchor ?? null);
-      return child;
+  },
+  className: {
+    configurable: true,
+    get(this: NodeMirror) {
+      return String(this.domAttrs?.class ?? "");
     },
-    removeChild(child: NodeMirror) {
-      removeNode(node, child);
-      return child;
+    set(this: NodeMirror, value: unknown) {
+      setProp(this, "class", value, this.domAttrs?.class);
     },
-    replaceChild(next: NodeMirror, current: NodeMirror) {
-      insertNode(node, next, current);
-      removeNode(node, current);
-      return current;
-    },
-    cloneNode(deep = false) {
-      return cloneNativeNode(node, !!deep);
-    },
-    remove() {
-      if (node.parent) removeNode(node.parent, node);
-    },
-    setAttribute(name: string, value: unknown) {
-      setDomAttribute(node, name, value);
-    },
-    removeAttribute(name: string) {
-      setDomAttribute(node, name, undefined);
-    },
-    getAttribute(name: string) {
-      const value = node.domAttrs?.[name];
-      return value == null ? null : String(value);
-    },
-    hasAttribute(name: string) {
-      return node.domAttrs?.[name] != null;
-    },
-    hasChildNodes() {
-      return node.children.length > 0;
-    },
-    contains(other: NodeMirror | null | undefined) {
-      let current = other ?? null;
+  },
+  isConnected: {
+    configurable: true,
+    get(this: NodeMirror) {
+      let current: NodeMirror | null = this;
       while (current) {
-        if (current === node) return true;
+        if (nativeRoots.has(current)) return true;
         current = current.parent;
       }
       return false;
     },
-    addEventListener() {},
-    removeEventListener() {},
-  };
-  Object.assign(node, methods, {
-    style: { length: 0, item: () => "" },
-    classList: { add() {}, remove() {} },
+  },
+});
+Object.assign(nativeNodePrototype, {
+  appendChild(this: NodeMirror, child: NodeMirror) {
+    insertNode(this, child);
+    return child;
+  },
+  insertBefore(this: NodeMirror, child: NodeMirror, anchor?: NodeMirror | null) {
+    insertNode(this, child, anchor ?? null);
+    return child;
+  },
+  removeChild(this: NodeMirror, child: NodeMirror) {
+    removeNode(this, child);
+    return child;
+  },
+  replaceChild(this: NodeMirror, next: NodeMirror, current: NodeMirror) {
+    insertNode(this, next, current);
+    removeNode(this, current);
+    return current;
+  },
+  cloneNode(this: NodeMirror, deep = false) {
+    return cloneNativeNode(this, !!deep);
+  },
+  remove(this: NodeMirror) {
+    if (this.parent) removeNode(this.parent, this);
+  },
+  setAttribute(this: NodeMirror, name: string, value: unknown) {
+    setDomAttribute(this, name, value);
+  },
+  removeAttribute(this: NodeMirror, name: string) {
+    setDomAttribute(this, name, undefined);
+  },
+  getAttribute(this: NodeMirror, name: string) {
+    const value = this.domAttrs?.[name];
+    return value == null ? null : String(value);
+  },
+  hasAttribute(this: NodeMirror, name: string) {
+    return this.domAttrs?.[name] != null;
+  },
+  hasChildNodes(this: NodeMirror) {
+    return this.children.length > 0;
+  },
+  contains(this: NodeMirror, other: NodeMirror | null | undefined) {
+    let current = other ?? null;
+    while (current) {
+      if (current === this) return true;
+      current = current.parent;
+    }
+    return false;
+  },
+  addEventListener(this: NodeMirror) {},
+  removeEventListener(this: NodeMirror) {},
+});
+
+function emptyStyleItem(): string { return ""; }
+function ignoreClassListChange(): void {}
+
+export function decorateNativeNode(node: NodeMirror): NodeMirror {
+  if ((node as unknown as Record<symbol, unknown>)[DOM_NODE] === true) return node;
+  Object.setPrototypeOf(node, nativeNodePrototype);
+  Object.defineProperty(node, DOM_NODE, { value: true });
+  Object.assign(node, {
+    style: { length: 0, item: emptyStyleItem },
+    classList: { add: ignoreClassListChange, remove: ignoreClassListChange },
   });
   return node;
 }
