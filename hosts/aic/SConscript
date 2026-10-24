@@ -88,6 +88,11 @@ port_src = [
     os.path.join(cwd, 'port', 'pocketjs_diag.c'),
     embedded_package,
 ]
+# POCKETJS_COM=0 compiles the PocketCOM com.* serial bridge out; the guest
+# then sees no globalThis.com and the shared app degrades the usual way.
+com_src = []
+if os.environ.get('POCKETJS_COM', '1') != '0':
+    com_src.append(os.path.join(cwd, 'port', 'pocketjs_com.c'))
 component_src = [
     os.path.join(components_dir, 'pocketjs_package', 'src', 'package.c'),
     os.path.join(components_dir, 'pocketjs_guest', 'src', 'guest.c'),
@@ -127,7 +132,7 @@ ge_flags = ''
 if os.environ.get('POCKETJS_GE', '1') == '0':
     ge_flags = ' -DPOCKETJS_AIC_GE_DISABLE'
 
-objs.extend(DefineGroup('PocketJSPort', port_src + component_src,
+objs.extend(DefineGroup('PocketJSPort', com_src + port_src + component_src,
                         depend=[''], CPPPATH=component_cpppath,
                         LOCAL_CFLAGS=' -DCONFIG_POCKETJS_GUEST_HEAP_LIMIT='
                                      '5242880 -D_GNU_SOURCE' + diag_flags

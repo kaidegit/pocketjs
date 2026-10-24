@@ -23,6 +23,7 @@
 #include "pocketjs/ui_qjs.h"
 
 #include "pocketjs_aic_contract.h"
+#include "pocketjs_com.h"
 #include "pocketjs_diag.h"
 #include "pocketjs_display.h"
 #include "pocketjs_ge.h"
@@ -241,6 +242,16 @@ static void pocketjs_aic_task(void *opaque) {
   }
 
   pocketjs_diag_sample("S2-guest", state.guest);
+
+#ifndef POCKETJS_AIC_COM_DISABLE
+  /* The product com surface must exist before the guest bundle evaluates:
+   * session.ts probes globalThis.com at module scope. */
+  if (pocketjs_aic_com_install(state.guest) != ESP_OK) {
+    rt_kprintf("[PocketJS] com: install failed\n");
+    exit_code = -1;
+    goto cleanup;
+  }
+#endif
 
   pocketjs_ui_core_config_t core_config;
   pocketjs_ui_core_config_defaults(&core_config);
@@ -517,6 +528,7 @@ cleanup:
     pocketjs_rgb565_renderer_destroy(state.renderer);
   }
   pocketjs_aic_ge_close(state.ge);
+  pocketjs_aic_com_shutdown();
   if (state.binding != RT_NULL) {
     pocketjs_ui_qjs_destroy(state.binding);
   }
