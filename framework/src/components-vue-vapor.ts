@@ -439,6 +439,10 @@ function createPortalRoot(): { marker: NodeMirror; host: NodeMirror; root: Rende
       insetB: 0,
       insetL: 0,
       zIndex: 1000,
+      // The persistent host is only portal plumbing. Bounds-based touch
+      // hits must pass through it when the content is empty or off-screen;
+      // visible children (including modal scrims) still claim hits normally.
+      hitPass: 1,
     },
     undefined,
   );
