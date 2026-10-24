@@ -160,9 +160,10 @@ matching the pre-GE firmware; the per-second log line reports the split as
   path first.
 - `CONFIG_DATA_ORDER_BGR` decides the byte order the display engine reads;
   if red and blue swap on the panel, fix that config, not the renderer.
-- GE offload is verified against the host-side `mpp_ge` stub; the BGR_565
-  source swap and the fill colors still need on-panel confirmation. A build
-  with `POCKETJS_GE=0` reproduces the pre-GE firmware for A/B checks.
+- GE offload passed the host-side `mpp_ge` stub regression and an on-panel
+  check on 2026-10-24 (GE ready line, correct colors including the BGR_565
+  source swap, sustained frames and touch interaction). A build with
+  `POCKETJS_GE=0` reproduces the pre-GE firmware for A/B measurement.
 - The os partition is 3072 KB; the firmware plus the embedded Hero package
   takes about 2660 KB of it. A package larger than the remaining headroom
   needs the `os` partition widened again or an external load path. The
