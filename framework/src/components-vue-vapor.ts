@@ -2,6 +2,7 @@
 
 import {
   defineVaporComponent,
+  getCurrentScope,
   insert as vaporInsert,
   onScopeDispose,
   shallowRef,
@@ -255,6 +256,32 @@ function mountChildren(node: NodeMirror, slots: SlotBag): void {
   insertBlock(slotDefault(slots), node);
 }
 
+// A component/conditional/list item already supplies a lifetime scope. Plain
+// host primitives can share its prop effect instead of creating a component
+// instance and watcher for each decoration. Dynamic slot bags use View/Text's
+// component path and keep Vue's slot proxy/lifecycle behavior.
+const primitiveBatches = new WeakMap<object, { updates: (() => void)[]; revision: ReturnType<typeof shallowRef<number>>; version: number }>();
+function watchPrimitiveProps(apply: () => void): void {
+  const scope = getCurrentScope();
+  if (!scope) { watchEffect(apply); return; }
+  let batch = primitiveBatches.get(scope);
+  if (!batch) {
+    batch = { updates: [apply], revision: shallowRef(0), version: 0 };
+    primitiveBatches.set(scope, batch);
+    const current = batch;
+    watchEffect(() => {
+      current.revision.value;
+      for (const update of current.updates) update();
+    });
+    onScopeDispose(() => { current.updates.length = 0; });
+  } else {
+    batch.updates.push(apply);
+    // Do not read the ref here: registration can run inside a parent render
+    // effect, which must not become dependent on this batch's membership.
+    batch.revision.value = ++batch.version;
+  }
+}
+
 function createPrimitiveNode(
   tag: "view" | "text" | "image" | "surface",
   rawProps: Record<string, unknown>,
@@ -277,6 +304,41 @@ function createPrimitiveNode(
     assignRef(rawProps.nodeRef ?? rawProps["node-ref"] ?? rawProps.ref, node);
   };
   watchEffect(apply);
+  return node;
+}
+
+/** Compiler-only path for plain imported View/Text JSX. Props are the raw
+ * getter bag emitted by vue-jsx-vapor; children and effects stay owned by the
+ * surrounding Vapor scope, and native removal/sweep owns the node subtree. */
+export function __createVaporPrimitive(tag: "view" | "text", props: Record<string, unknown>, slots: SlotBag): NodeMirror {
+  const node = createElement(tag);
+  mountChildren(node, slots);
+  const press = callbackOf(props.onPress);
+  const pressAlias = callbackOf(props["on:press"]);
+  watchPrimitiveProps(() => {
+    // The compiler admits fixed property bags only. Native domAttrs already
+    // owns the previous values, so no per-node omit Set/duplicate props cache
+    // or per-update getter/event-wrapper clones are needed on this path.
+    for (const rawKey in props) {
+      if (!Object.hasOwn(props, rawKey)) continue;
+      const key = rawKey === "debug-name" ? "debugName" : rawKey;
+      if (key === "children" || key === "key" || key === "ref" || key === "nodeRef" || key === "node-ref" || key === "className") continue;
+      let next: unknown;
+      if (key === "class") next = normalizeClassValue(props.class) ?? normalizeClassValue(props.className);
+      else if (key === "style") next = normalizeStyleValue(props.style);
+      else if (key === "onPress") next = press;
+      else if (key === "on:press") next = pressAlias;
+      else if (key === "focusable") {
+        next = valueOf(props.focusable);
+        if (next === "") next = true;
+      } else next = valueOf(props[rawKey]);
+      setProp(node, key, next, node.domAttrs?.[key]);
+    }
+    if (!("class" in props) && "className" in props) {
+      setProp(node, "class", normalizeClassValue(props.className), node.domAttrs?.class);
+    }
+    assignRef(valueOf(props.nodeRef ?? props["node-ref"]), node);
+  });
   return node;
 }
 

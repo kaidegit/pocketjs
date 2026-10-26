@@ -68,6 +68,7 @@ export function createVueVaporTestRuntime() {
     defineVaporComponent<T>(setup: T): T {
       return setup;
     },
+    getCurrentScope() { return undefined; },
     insert: insertMockVaporBlock,
     onScopeDispose() {},
     remove: removeMockVaporBlock,

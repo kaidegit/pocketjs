@@ -16,6 +16,7 @@ import { getSolidAotProgram, resolveSolidAotMock, resolveSolidAotModel } from ".
 import { normalizeSolidAotSemantics } from "../../microts/compiler/aot-solid-semantics.ts";
 import { transformCompiledModel } from "../../microts/compiler/aot-model-build.ts";
 import { exposeVaporFrameFlush } from "./vue-vapor-frame-flush.ts";
+import { lowerVaporPrimitives } from "./vue-vapor-primitives.ts";
 import { checkVueAotSource, hasVueAotContract, resolveVueAotMock } from "../../microts/compiler/aot-browser.ts";
 import {
   propsHelperCode,
@@ -621,7 +622,7 @@ export async function transformFile(
       filename: path,
       presets: opts.presets,
       parserOpts: opts.parserOpts,
-      plugins: options.features === undefined ? [] : [makeFeatureFolder(options.features)],
+      plugins: [...(options.features === undefined ? [] : [makeFeatureFolder(options.features)]), lowerVaporPrimitives()],
       babelrc: false,
       configFile: false,
       sourceMaps: false,
