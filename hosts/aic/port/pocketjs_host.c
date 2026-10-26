@@ -27,6 +27,7 @@
 #include "pocketjs_diag.h"
 #include "pocketjs_display.h"
 #include "pocketjs_ge.h"
+#include "pocketjs_gc.h"
 #include "pocketjs_heap.h"
 #include "pocketjs_touch.h"
 #include "pocketjs_time.h"
@@ -49,6 +50,13 @@ struct pocketjs_aic_state {
   uint32_t touch_range_y;
   uint32_t buffer_index;
 };
+
+static void pocketjs_collect(pocketjs_guest_t *guest, pocketjs_aic_gc_t *gc) {
+  pocketjs_heap_diag_t heap;
+  pocketjs_guest_run_gc(guest);
+  pocketjs_heap_diag(&heap);
+  pocketjs_aic_gc_collected(gc, (uint32_t)rt_tick_get(), heap.live);
+}
 
 /* The package lives either on a filesystem path or linked into the firmware
  * as generated/pocket_bin.c. One host process runs at a time, so the source
@@ -323,6 +331,16 @@ static void pocketjs_aic_task(void *opaque) {
 
   pocketjs_diag_sample("S5-renderer", state.guest);
 
+  /* Compilation and mount can leave cycles that the first interaction
+   * would otherwise have to coexist with. All JS callbacks have returned.
+   * Start the frame clock after this one-time collection. */
+  pocketjs_aic_gc_t gc = {0};
+  rt_tick_t gc_started = rt_tick_get();
+  pocketjs_collect(state.guest, &gc);
+  rt_tick_t gc_ticks_max = rt_tick_get() - gc_started;
+  uint32_t gc_count = 1U;
+  pocketjs_diag_sample("S5-gc", state.guest);
+
   const uint32_t tick_hz = POCKETJS_AIC_CONTRACT_TICK_HZ;
   const rt_tick_t frame_ticks = rt_tick_from_millisecond(1000U / tick_hz);
   rt_tick_t next_frame = rt_tick_get();
@@ -330,7 +348,6 @@ static void pocketjs_aic_task(void *opaque) {
   uint32_t frames_total = 0U;
   rt_tick_t stats_deadline = rt_tick_get() + rt_tick_from_millisecond(1000U);
   uint32_t touch_reports = 0U;
-  rt_tick_t gc_deadline = rt_tick_get() + rt_tick_from_millisecond(2000U);
   pocketjs_rgb565_render_stats_t second_stats;
   rt_memset(&second_stats, 0, sizeof(second_stats));
   second_stats.struct_size = sizeof(second_stats);
@@ -474,13 +491,18 @@ static void pocketjs_aic_task(void *opaque) {
     second_stats.damage_pixels += frame_stats.damage_pixels;
     second_stats.damage_regions += frame_stats.damage_regions;
     second_stats.full_redraw |= frame_stats.full_redraw;
-    if (frame_stats.damage_regions == 0U) {
-      /* The frame did no visible work, so pay the collection cost here
-       * instead of letting the adaptive trigger stop a busy frame. */
-      if (pocketjs_aic_tick_reached(rt_tick_get(), gc_deadline)) {
-        pocketjs_guest_run_gc(state.guest);
-        gc_deadline = rt_tick_get() + rt_tick_from_millisecond(2000U);
-      }
+    pocketjs_heap_diag_t heap;
+    rt_size_t gc_total = 0U, gc_used = 0U;
+    pocketjs_heap_diag(&heap);
+    pocketjs_heap_stats(&gc_total, &gc_used, RT_NULL);
+    const size_t available = gc_total > gc_used ? gc_total - gc_used : 0U;
+    if (pocketjs_aic_gc_due(&gc, (uint32_t)rt_tick_get(), RT_TICK_PER_SECOND,
+                           heap.live, available, frame_stats.damage_regions == 0U)) {
+      gc_started = rt_tick_get();
+      pocketjs_collect(state.guest, &gc);
+      const rt_tick_t gc_ticks = rt_tick_get() - gc_started;
+      if (gc_ticks > gc_ticks_max) gc_ticks_max = gc_ticks;
+      gc_count++;
     }
     if (pocketjs_aic_tick_reached(rt_tick_get(), stats_deadline)) {
       stats_deadline += rt_tick_from_millisecond(1000U);
@@ -496,11 +518,12 @@ static void pocketjs_aic_task(void *opaque) {
       pocketjs_heap_stats(&pool_total, &pool_used, &pool_max);
       const uint32_t reports = pocketjs_aic_touch_report_count(state.touch);
       rt_kprintf("[PocketJS] turn_max=%u ms touch_reports=%u "
-                 "sys_heap=%u/%u max=%u\n",
+                 "sys_heap=%u/%u max=%u gc=%u gc_max=%u ms\n",
                  (unsigned)(turn_ticks_max * 1000U / RT_TICK_PER_SECOND),
                  (unsigned)(reports - touch_reports),
                  (unsigned)pool_used, (unsigned)pool_total,
-                 (unsigned)pool_max);
+                 (unsigned)pool_max, (unsigned)gc_count,
+                 (unsigned)(gc_ticks_max * 1000U / RT_TICK_PER_SECOND));
       frames = 0U;
       touch_reports = reports;
       turn_ticks_max = 0U;
