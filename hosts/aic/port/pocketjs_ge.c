@@ -6,9 +6,10 @@
  * the RGB565 destination. srm_psm5650_to_rgb565 maps to one GE bitblt whose
  * source is declared MPP_FMT_BGR_565, because PSP PSM 5650 stores R and B
  * opposite to the framebuffer's RGB565 and the format conversion swaps them.
- * blend_a8_rgb565 stays unmapped: GE has no alpha-only source format, so
- * glyph masks and alpha quads keep the CPU rasterizer and the accelerator
- * leaves that callback NULL.
+ * blend_a8_rgb565 expands A8 coverage to straight ARGB8888 in a bounded
+ * reusable staging surface, then blends into a private RGB565 destination.
+ * Only completed results reach the caller, so a failed blend can be replayed
+ * in software without applying alpha twice.
  *
  * Every callback upholds the synchronous PpaOps contract. GE normal mode
  * blocks in the ioctl until the finish IRQ, destination cache lines are
@@ -17,6 +18,8 @@
  * unsupported request returns false, and the renderer repeats the operation
  * in software; fill and blit are whole-rectangle writes, so the replay after
  * a partial GE failure still produces the same pixels. */
+#include <string.h>
+
 #include <rtconfig.h>
 #include <rtthread.h>
 
@@ -57,8 +60,17 @@ pocketjs_aic_ge_accelerator(const struct pocketjs_aic_ge *ge) {
 
 #include <mpp_ge.h>
 
+#define POCKETJS_GE_BLEND_PIXELS 8192U
+#define POCKETJS_GE_CACHE_ALIGN 64U
+
 struct pocketjs_aic_ge {
   struct mpp_ge *ge;
+  void *blend_allocation;
+  uint32_t *blend_source;
+  uint16_t *blend_destination;
+  bool blend_allocation_attempted;
+  bool blend_logged;
+  bool fill_logged;
   pocketjs_rgb565_accelerator_t accelerator;
 };
 
@@ -114,7 +126,7 @@ static bool pocketjs_ge_fill(void *user_data, uint16_t *destination,
   if (state == RT_NULL || state->ge == RT_NULL) {
     return false;
   }
-  if (width == 0U || height == 0U ||
+  if (width == 0U || height == 0U || (width & 3U) != 0U ||
       (size_t)width * height != destination_pixels ||
       !pocketjs_ge_rect_inside(rect, width, height)) {
     return false;
@@ -137,11 +149,123 @@ static bool pocketjs_ge_fill(void *user_data, uint16_t *destination,
   fill.dst_buf.format = MPP_FMT_RGB_565;
   /* ctrl stays zeroed: no alpha blending, no dither, plain overwrite. */
 
+  bool trace = !state->fill_logged;
+  state->fill_logged = true;
+  if (trace) rt_kprintf("[PocketJS] ge: first fill begin\n");
   pocketjs_ge_clean_rows(destination, width, rect);
-  if (mpp_ge_fillrect(state->ge, &fill) < 0) {
+  int result = mpp_ge_fillrect(state->ge, &fill);
+  if (trace) rt_kprintf("[PocketJS] ge: first fill end rc=%d\n", result);
+  if (result < 0) {
     return false;
   }
   pocketjs_ge_invalidate_rows(destination, width, rect);
+  return true;
+}
+
+/* GE has no A8 input. Keep the conversion bounded (48 KiB plus alignment),
+ * with no per-operation allocations. Oversized masks retain the CPU path.
+ * Source and output start on separate cache lines; DMA never writes caller
+ * memory, including on errors. The render thread owns this scratch surface. */
+static bool pocketjs_ge_blend(void *user_data, uint16_t *destination,
+                             size_t destination_pixels, uint32_t width,
+                             uint32_t height, const uint8_t *mask,
+                             size_t mask_bytes, pocketjs_rgb565_rect_t rect,
+                             uint8_t r, uint8_t g, uint8_t b, uint8_t alpha) {
+  struct pocketjs_aic_ge *state = user_data;
+  if (state == RT_NULL || state->ge == RT_NULL || destination == RT_NULL ||
+      mask == RT_NULL || width == 0U || height == 0U ||
+      (size_t)width > SIZE_MAX / height ||
+      (size_t)width * height != destination_pixels ||
+      mask_bytes < destination_pixels ||
+      !pocketjs_ge_rect_inside(rect, width, height) ||
+      rect.width > POCKETJS_GE_BLEND_PIXELS / rect.height) {
+    return false;
+  }
+  if (alpha == 0U) {
+    return true;
+  }
+  /* SDK ge_test/public/ge_mem.c aligns BOTH strides to 8 bytes. A shared
+   * four-pixel pitch satisfies ARGB8888 and RGB565 without packed odd rows. */
+  uint32_t pitch = (rect.width + 3U) & ~3U;
+  if (pitch > POCKETJS_GE_BLEND_PIXELS / rect.height) return false;
+  bool trace = !state->blend_logged;
+  state->blend_logged = true;
+  if (trace) rt_kprintf("[PocketJS] ge: first A8 begin rect=%ux%u pitch=%u\n",
+                        (unsigned)rect.width, (unsigned)rect.height, (unsigned)pitch);
+  if (!state->blend_allocation_attempted) {
+    state->blend_allocation_attempted = true;
+    state->blend_allocation = aicos_malloc(MEM_CMA, POCKETJS_GE_BLEND_PIXELS * 6U +
+                                        POCKETJS_GE_CACHE_ALIGN - 1U);
+    if (state->blend_allocation != RT_NULL) {
+      uintptr_t aligned = ((uintptr_t)state->blend_allocation +
+                           POCKETJS_GE_CACHE_ALIGN - 1U) &
+                          ~(uintptr_t)(POCKETJS_GE_CACHE_ALIGN - 1U);
+      state->blend_source = (uint32_t *)aligned;
+      state->blend_destination = (uint16_t *)(state->blend_source +
+                                              POCKETJS_GE_BLEND_PIXELS);
+    } else {
+      rt_kprintf("[PocketJS] ge: A8 scratch unavailable; blend on CPU\n");
+    }
+  }
+  if (state->blend_source == RT_NULL) {
+    return false;
+  }
+  size_t pixels = (size_t)pitch * rect.height;
+  rt_memset(state->blend_source, 0, pixels * 4U);
+  rt_memset(state->blend_destination, 0, pixels * 2U);
+  uint32_t rgb = (uint32_t)r << 16 | (uint32_t)g << 8 | b;
+  for (uint32_t y = 0; y < rect.height; y++) {
+    size_t offset = (size_t)(rect.y + y) * width + rect.x;
+    for (uint32_t x = 0; x < rect.width; x++) {
+      size_t index = (size_t)y * pitch + x;
+      /* Match the renderer's coverage/global-alpha rounding on the CPU;
+       * GE receives pixel alpha only, avoiding a second alpha multiply. */
+      uint32_t coverage = ((uint32_t)mask[offset + x] * alpha + 127U) / 255U;
+      state->blend_source[index] = coverage << 24 | rgb;
+      state->blend_destination[index] = destination[offset + x];
+    }
+  }
+
+  struct ge_bitblt blt;
+  rt_memset(&blt, 0, sizeof(blt));
+  blt.src_buf.buf_type = MPP_PHY_ADDR;
+  blt.src_buf.phy_addr[0] = (unsigned int)(uintptr_t)state->blend_source;
+  blt.src_buf.stride[0] = pitch * 4U;
+  blt.src_buf.size.width = (int)rect.width;
+  blt.src_buf.size.height = (int)rect.height;
+  blt.src_buf.format = MPP_FMT_ARGB_8888;
+  blt.dst_buf.buf_type = MPP_PHY_ADDR;
+  blt.dst_buf.phy_addr[0] = (unsigned int)(uintptr_t)state->blend_destination;
+  blt.dst_buf.stride[0] = pitch * 2U;
+  blt.dst_buf.size = blt.src_buf.size;
+  blt.dst_buf.format = MPP_FMT_RGB_565;
+  /* The SDK header's alpha_en comment is inverted; hal_ge_normal.c tests
+   * alpha_en != 0. GE_PD_NONE is straight source-alpha / inverse-alpha. */
+  blt.ctrl.alpha_en = 1;
+  blt.ctrl.alpha_rules = GE_PD_NONE;
+  blt.ctrl.src_alpha_mode = 0;
+  blt.ctrl.dst_alpha_mode = 1;
+  blt.ctrl.dst_global_alpha = 255;
+
+  aicos_dcache_clean_range((unsigned long *)state->blend_source, pixels * 4U);
+  aicos_dcache_clean_range((unsigned long *)state->blend_destination, pixels * 2U);
+  if (trace) rt_kprintf("[PocketJS] ge: first A8 submit src=%p dst=%p strides=%u/%u\n",
+                        (void *)state->blend_source, (void *)state->blend_destination,
+                        (unsigned)blt.src_buf.stride[0], (unsigned)blt.dst_buf.stride[0]);
+  int result = mpp_ge_bitblt(state->ge, &blt);
+  if (result >= 0) result = mpp_ge_emit(state->ge);
+  if (result >= 0) result = mpp_ge_sync(state->ge);
+  if (trace) rt_kprintf("[PocketJS] ge: first A8 end rc=%d\n", result);
+  /* Invalidate even on failure: GE may have modified part of the private
+   * output. Nothing is copied to the caller unless the operation succeeded. */
+  aicos_dcache_invalid_range((unsigned long *)state->blend_destination, pixels * 2U);
+  if (result < 0) {
+    return false;
+  }
+  for (uint32_t y = 0; y < rect.height; y++) {
+    memcpy(destination + (size_t)(rect.y + y) * width + rect.x,
+           state->blend_destination + (size_t)y * pitch, rect.width * 2U);
+  }
   return true;
 }
 
@@ -157,12 +281,12 @@ static bool pocketjs_ge_srm(void *user_data, uint16_t *destination,
   if (state == RT_NULL || state->ge == RT_NULL || rotation != 0U) {
     return false;
   }
-  if (source_width == 0U || source_height == 0U ||
+  if (source_width == 0U || source_height == 0U || (source_width & 3U) != 0U ||
       source_bytes < (size_t)source_width * source_height * 2U ||
       !pocketjs_ge_rect_inside(source_rect, source_width, source_height)) {
     return false;
   }
-  if (width == 0U || height == 0U ||
+  if (width == 0U || height == 0U || (width & 3U) != 0U ||
       (size_t)width * height != destination_pixels ||
       !pocketjs_ge_rect_inside(destination_rect, width, height)) {
     return false;
@@ -230,11 +354,18 @@ struct pocketjs_aic_ge *pocketjs_aic_ge_open(void) {
     rt_kprintf("[PocketJS] ge: mpp_ge_open failed; CPU rendering only\n");
     return ge;
   }
+  if (mpp_ge_get_mode(ge->ge) != GE_MODE_NORMAL) {
+    rt_kprintf("[PocketJS] ge: asynchronous mode unsupported; CPU rendering only\n");
+    mpp_ge_close(ge->ge);
+    ge->ge = RT_NULL;
+    return ge;
+  }
   ge->accelerator.struct_size = sizeof(ge->accelerator);
   ge->accelerator.user_data = ge;
   ge->accelerator.fill_rgb565 = pocketjs_ge_fill;
+  ge->accelerator.blend_a8_rgb565 = pocketjs_ge_blend;
   ge->accelerator.srm_psm5650_rgb565 = pocketjs_ge_srm;
-  rt_kprintf("[PocketJS] ge: %s mode ready (fill + psm5650 blit; A8 blend on CPU)\n",
+  rt_kprintf("[PocketJS] ge: %s mode ready (fill + psm5650 blit + staged A8 blend)\n",
              mpp_ge_get_mode(ge->ge) == GE_MODE_CMDQ ? "cmdq" : "normal");
   return ge;
 }
@@ -246,6 +377,7 @@ void pocketjs_aic_ge_close(struct pocketjs_aic_ge *ge) {
   if (ge->ge != RT_NULL) {
     mpp_ge_close(ge->ge);
   }
+  if (ge->blend_allocation != RT_NULL) aicos_free(MEM_CMA, ge->blend_allocation);
   rt_free(ge);
 }
 

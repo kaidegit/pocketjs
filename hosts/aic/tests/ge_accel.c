@@ -17,10 +17,23 @@
 
 /* -- rtthread surface ------------------------------------------------- */
 
-void *rt_malloc(rt_size_t size) { return malloc(size); }
+static bool allocation_fails;
+static int allocations;
+void *rt_malloc(rt_size_t size) {
+  allocations++;
+  return allocation_fails ? NULL : malloc(size);
+}
 void rt_free(void *pointer) { free(pointer); }
+void *aicos_malloc(unsigned int mem_type, size_t size) {
+  assert(mem_type == MEM_CMA);
+  return rt_malloc(size);
+}
+void aicos_free(unsigned int mem_type, void *pointer) {
+  assert(mem_type == MEM_CMA);
+  rt_free(pointer);
+}
 
-static char kprintf_log[512];
+static char kprintf_log[4096];
 void rt_kprintf(const char *format, ...) {
   va_list arguments;
   va_start(arguments, format);
@@ -32,6 +45,7 @@ void rt_kprintf(const char *format, ...) {
 /* -- recorded mpp_ge --------------------------------------------------- */
 
 static bool open_fails;
+static enum ge_mode engine_mode = GE_MODE_NORMAL;
 static int fill_result = 1;
 static int blt_result = 1;
 static int open_calls, fill_calls, blt_calls;
@@ -84,7 +98,15 @@ void mpp_ge_close(struct mpp_ge *ge) { (void)ge; }
 
 enum ge_mode mpp_ge_get_mode(struct mpp_ge *ge) {
   (void)ge;
-  return GE_MODE_NORMAL;
+  return engine_mode;
+}
+
+static int emit_result, sync_result;
+int mpp_ge_emit(struct mpp_ge *ge) {
+  (void)ge; record_event("emit", 0); return emit_result;
+}
+int mpp_ge_sync(struct mpp_ge *ge) {
+  (void)ge; record_event("sync", 0); return sync_result;
 }
 
 int mpp_ge_fillrect(struct mpp_ge *ge, struct ge_fillrect *fill) {
@@ -100,6 +122,40 @@ int mpp_ge_bitblt(struct mpp_ge *ge, struct ge_bitblt *blt) {
   blt_calls++;
   last_blt = *blt;
   record_event("blt", last_blt.dst_buf.phy_addr[0]);
+  if (blt->ctrl.alpha_en) {
+    /* Resolve 32-bit DMA addresses through the full-width cache log on LP64.
+     * This model validates staging and coverage, not hardware rounding. */
+    assert(blt->ctrl.alpha_rules == GE_PD_NONE);
+    assert(blt->ctrl.src_alpha_mode == 0);
+    assert(blt->ctrl.dst_alpha_mode == 1 && blt->ctrl.dst_global_alpha == 255);
+    assert(blt->src_buf.format == MPP_FMT_ARGB_8888);
+    assert(blt->dst_buf.format == MPP_FMT_RGB_565);
+    assert(blt->src_buf.crop_en == 0 && blt->dst_buf.crop_en == 0);
+    assert(event_count >= 3);
+    uint32_t *source = (uint32_t *)(uintptr_t)event_addresses[event_count - 3];
+    uint16_t *output = (uint16_t *)(uintptr_t)event_addresses[event_count - 2];
+    assert(((uintptr_t)source & 63U) == 0 && ((uintptr_t)output & 63U) == 0);
+    assert((unsigned int)(uintptr_t)source == blt->src_buf.phy_addr[0]);
+    assert((unsigned int)(uintptr_t)output == blt->dst_buf.phy_addr[0]);
+    /* Reject the previous packed odd-width implementation: base alignment
+     * alone does not satisfy the SDK GE buffer layout. */
+    assert(blt->src_buf.stride[0] % 8U == 0);
+    assert(blt->dst_buf.stride[0] % 8U == 0);
+    unsigned pitch = blt->dst_buf.stride[0] / 2U;
+    assert(blt->src_buf.stride[0] / 4U == pitch);
+    for (int y = 0; y < blt->src_buf.size.height; y++) {
+     for (int x = 0; x < blt->src_buf.size.width; x++) {
+      size_t i = (size_t)y * pitch + x;
+      unsigned a = source[i] >> 24;
+      unsigned r5 = output[i] >> 11, g6 = (output[i] >> 5) & 63, b5 = output[i] & 31;
+      unsigned r = (((source[i] >> 16) & 255) * a + ((r5 << 3) | (r5 >> 2)) * (255-a) + 127) / 255;
+      unsigned g = (((source[i] >> 8) & 255) * a + ((g6 << 2) | (g6 >> 4)) * (255-a) + 127) / 255;
+      unsigned b = ((source[i] & 255) * a + ((b5 << 3) | (b5 >> 2)) * (255-a) + 127) / 255;
+      output[i] = (uint16_t)((r >> 3) << 11 | (g >> 2) << 5 | (b >> 3));
+      if (blt_result < 0) return blt_result; /* partial DMA before failure */
+     }
+    }
+  }
   return blt_result;
 }
 
@@ -120,8 +176,7 @@ static void test_fill_mapping(void) {
   assert(accelerator != NULL);
   assert(accelerator->fill_rgb565 != NULL);
   assert(accelerator->srm_psm5650_rgb565 != NULL);
-  /* GE has no alpha-only source format; the A8 blend must stay on the CPU. */
-  assert(accelerator->blend_a8_rgb565 == NULL);
+  assert(accelerator->blend_a8_rgb565 != NULL);
   assert(strstr(kprintf_log, "normal mode ready") != NULL);
 
   events_reset();
@@ -286,6 +341,106 @@ static void test_srm_mapping(void) {
   pocketjs_aic_ge_close(ge);
 }
 
+static uint16_t reference_blend(uint16_t dst, uint8_t mask, unsigned alpha) {
+  unsigned a = (mask * alpha + 127) / 255;
+  unsigned r5 = dst >> 11, g6 = (dst >> 5) & 63, b5 = dst & 31;
+  unsigned r = (137 * a + ((r5 << 3) | (r5 >> 2)) * (255-a) + 127) / 255;
+  unsigned g = (213 * a + ((g6 << 2) | (g6 >> 4)) * (255-a) + 127) / 255;
+  unsigned b = (47 * a + ((b5 << 3) | (b5 >> 2)) * (255-a) + 127) / 255;
+  return (uint16_t)((r >> 3) << 11 | (g >> 2) << 5 | (b >> 3));
+}
+
+static void test_blend(void) {
+  uint16_t destination[32 * 16], original[32 * 16];
+  uint8_t mask[32 * 16];
+  for (size_t i = 0; i < 32 * 16; i++) {
+    original[i] = (uint16_t)(i * 127);
+    mask[i] = (uint8_t)i;
+  }
+  struct pocketjs_aic_ge *ge = pocketjs_aic_ge_open();
+  const pocketjs_rgb565_accelerator_t *acc = pocketjs_aic_ge_accelerator(ge);
+  pocketjs_rgb565_rect_t rect = { .x=3, .y=2, .width=27, .height=12 };
+  int before_alloc = allocations;
+  const unsigned alphas[] = {255, 127, 1, 0};
+  for (size_t a = 0; a < sizeof(alphas)/sizeof(alphas[0]); a++) {
+    memcpy(destination, original, sizeof(original));
+    events_reset();
+    assert(acc->blend_a8_rgb565(acc->user_data, destination, 512, 32, 16,
+                               mask, sizeof(mask), rect, 137, 213, 47, alphas[a]));
+    for (unsigned y = 0; y < 16; y++) {
+      for (unsigned x = 0; x < 32; x++) {
+        size_t i = y * 32 + x;
+        uint16_t expected = (x >= 3 && x < 30 && y >= 2 && y < 14)
+          ? reference_blend(original[i], mask[i], alphas[a]) : original[i];
+        assert(destination[i] == expected);
+      }
+    }
+    if (alphas[a]) {
+      assert(event_count == 6);
+      assert(!strcmp(events[0], "clean") && !strcmp(events[1], "clean"));
+      assert(!strcmp(events[2], "blt") && !strcmp(events[3], "emit"));
+      assert(!strcmp(events[4], "sync") && !strcmp(events[5], "invalid"));
+      assert(event_sizes[0] == 28 * 12 * 4 && event_sizes[1] == 28 * 12 * 2);
+    } else assert(event_count == 0);
+  }
+  assert(allocations == before_alloc + 1);
+  /* The exact capacity is accepted, with every A8 value and a full mask. */
+  static uint16_t full[8192];
+  static uint8_t full_mask[8192];
+  for (size_t i = 0; i < 8192; i++) {
+    full[i] = (uint16_t)i;
+    full_mask[i] = (uint8_t)i;
+  }
+  pocketjs_rgb565_rect_t capacity = { .width=256, .height=32 };
+  events_reset();
+  assert(acc->blend_a8_rgb565(acc->user_data, full, 8192, 256, 32,
+                             full_mask, 8192, capacity, 137, 213, 47, 255));
+  for (size_t i = 0; i < 8192; i++)
+    assert(full[i] == reference_blend((uint16_t)i, (uint8_t)i, 255));
+  assert(allocations == before_alloc + 1);
+  events_reset();
+  memcpy(destination, original, sizeof(original));
+  blt_result = -1;
+  assert(!acc->blend_a8_rgb565(acc->user_data, destination, 512, 32, 16,
+                              mask, sizeof(mask), rect, 137, 213, 47, 255));
+  assert(!memcmp(destination, original, sizeof(original)));
+  assert(event_index("invalid") > event_index("blt"));
+  blt_result = 1;
+  for (unsigned fail = 0; fail < 2; fail++) {
+    emit_result = fail == 0 ? -1 : 0;
+    sync_result = fail == 1 ? -1 : 0;
+    events_reset();
+    assert(!acc->blend_a8_rgb565(acc->user_data, destination, 512, 32, 16,
+                                mask, sizeof(mask), rect, 137, 213, 47, 255));
+    assert(!memcmp(destination, original, sizeof(original)));
+  }
+  emit_result = sync_result = 0;
+  events_reset();
+  assert(!acc->blend_a8_rgb565(acc->user_data, destination, 512, 32, 16,
+                              mask, 511, rect, 137, 213, 47, 255));
+  rect.x = 31;
+  assert(!acc->blend_a8_rgb565(acc->user_data, destination, 512, 32, 16,
+                              mask, sizeof(mask), rect, 137, 213, 47, 255));
+  pocketjs_rgb565_rect_t big = { .width=129, .height=64 };
+  assert(!acc->blend_a8_rgb565(acc->user_data, destination, 129*64, 129, 64,
+                              mask, 129*64, big, 137, 213, 47, 255));
+  assert(event_count == 0);
+  pocketjs_aic_ge_close(ge);
+  ge = pocketjs_aic_ge_open();
+  acc = pocketjs_aic_ge_accelerator(ge);
+  allocation_fails = true;
+  rect.x = 3;
+  before_alloc = allocations;
+  for (int i = 0; i < 2; i++) {
+    assert(!acc->blend_a8_rgb565(acc->user_data, destination, 512, 32, 16,
+                                mask, sizeof(mask), rect, 137, 213, 47, 255));
+  }
+  assert(allocations == before_alloc + 1);
+  assert(!memcmp(destination, original, sizeof(original)));
+  allocation_fails = false;
+  pocketjs_aic_ge_close(ge);
+}
+
 static void test_open_failure_and_toggle(void) {
   open_fails = true;
   kprintf_log[0] = '\0';
@@ -296,6 +451,13 @@ static void test_open_failure_and_toggle(void) {
   pocketjs_aic_ge_close(ge);
   open_fails = false;
 
+  engine_mode = GE_MODE_CMDQ;
+  ge = pocketjs_aic_ge_open();
+  assert(ge != NULL && pocketjs_aic_ge_accelerator(ge) == NULL);
+  assert(strstr(kprintf_log, "asynchronous mode unsupported") != NULL);
+  pocketjs_aic_ge_close(ge);
+  engine_mode = GE_MODE_NORMAL;
+
   assert(pocketjs_aic_ge_accelerator(NULL) == NULL);
   pocketjs_aic_ge_close(NULL);
   assert(open_calls >= 2);
@@ -304,6 +466,7 @@ static void test_open_failure_and_toggle(void) {
 int main(void) {
   test_fill_mapping();
   test_srm_mapping();
+  test_blend();
   test_open_failure_and_toggle();
   printf("AIC GE accelerator regressions passed\n");
   return 0;

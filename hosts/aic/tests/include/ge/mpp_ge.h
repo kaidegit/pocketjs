@@ -27,6 +27,10 @@ static inline void aicos_dcache_invalid_range(unsigned long *address,
   test_ge_cache_log("invalid", address, (size_t)size);
 }
 
+enum { MEM_CMA = 1 };
+void *aicos_malloc(unsigned int mem_type, size_t size);
+void aicos_free(unsigned int mem_type, void *pointer);
+
 enum mpp_buf_type {
   MPP_DMA_BUF_FD,
   MPP_PHY_ADDR,
@@ -70,6 +74,8 @@ enum ge_fillrect_type {
   GE_V_LINEAR_GRADIENT = 2,
 };
 
+enum ge_pd_rules { GE_PD_NONE = 0 };
+
 struct ge_ctrl {
   unsigned int alpha_en;
   unsigned int alpha_rules;
@@ -110,6 +116,8 @@ struct mpp_ge;
 struct mpp_ge *mpp_ge_open(void);
 void mpp_ge_close(struct mpp_ge *ge);
 enum ge_mode mpp_ge_get_mode(struct mpp_ge *ge);
+int mpp_ge_emit(struct mpp_ge *ge);
+int mpp_ge_sync(struct mpp_ge *ge);
 int mpp_ge_fillrect(struct mpp_ge *ge, struct ge_fillrect *fill);
 int mpp_ge_bitblt(struct mpp_ge *ge, struct ge_bitblt *blt);
 

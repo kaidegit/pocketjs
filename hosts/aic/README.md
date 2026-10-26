@@ -117,9 +117,19 @@ The guest bundle evaluates against the `pocketjs_native_ui_*` core and the
 accelerator table: `fill_rgb565` runs as one GE fillrect (the constant color
 travels as the ARGB8888 fill source), `srm_psm5650_to_rgb565` runs as one GE
 bitblt whose source is declared `MPP_FMT_BGR_565` because PSM 5650 stores R
-and B opposite to the framebuffer's RGB565, and `blend_a8_rgb565` stays NULL
-because GE has no alpha-only source format — glyph masks and alpha quads keep
-the CPU path. GE runs in normal mode (`RT_USING_PM` disables cmdq), so each
+and B opposite to the framebuffer's RGB565. `blend_a8_rgb565` expands A8
+coverage and global alpha into straight ARGB8888 on the CPU. GE blends it
+into private RGB565 scratch, and the callback copies completed output to the
+caller. A failed submission leaves caller pixels intact for software replay.
+Scratch follows the SDK GE example: MEM_CMA allocation on first use, reused
+until close, and both strides aligned to eight bytes. A shared four-pixel
+pitch counts padding toward the 8192-pixel limit (49152 bytes plus 63 bytes
+for base alignment). Larger masks and allocation failure use the CPU.
+The callback calls bitblt, emit, and sync before reading output; the last two
+are no-ops in normal mode. First fill and A8 submission logs locate first-frame
+stalls. An earlier packed-stride implementation black-screened on device;
+the padded layout still requires device verification.
+Hardware blend rounding and performance require device verification. GE accepts normal mode only (`RT_USING_PM` disables cmdq), so each
 ioctl blocks until the finish IRQ; the destination rows are cache-cleaned
 before the DMA and invalidated after it, which keeps the synchronous PpaOps
 contract while CPU software ops interleave within one frame. Requests GE
