@@ -133,6 +133,13 @@ function slotDefault(slots: SlotBag, ...args: unknown[]): unknown {
   });
 }
 
+function nativeDocumentText(value: unknown = ""): NodeMirror {
+  return createTextNode(String(value));
+}
+function nativeDocumentComment(value: unknown = ""): NodeMirror {
+  return createCommentNode(String(value));
+}
+
 function withNativeTextDocument<T>(fn: () => T): T {
   // Patch the guest's document, never the embedding page's: vue-vapor builds
   // alias the guest `document` to globalThis.__pocketDocument (see
@@ -147,9 +154,10 @@ function withNativeTextDocument<T>(fn: () => T): T {
   if (!doc) return fn();
   const prevCreateTextNode = doc.createTextNode;
   const prevCreateComment = doc.createComment;
+  if (prevCreateTextNode === nativeDocumentText && prevCreateComment === nativeDocumentComment) return fn();
   try {
-    doc.createTextNode = (value = "") => createTextNode(String(value));
-    doc.createComment = (value = "") => createCommentNode(String(value));
+    doc.createTextNode = nativeDocumentText;
+    doc.createComment = nativeDocumentComment;
     return fn();
   } finally {
     if (prevCreateTextNode) doc.createTextNode = prevCreateTextNode;
@@ -161,7 +169,7 @@ function withNativeTextDocument<T>(fn: () => T): T {
 
 function normalizeVaporBlock(block: unknown): unknown | null {
   while (typeof block === "function" && block.length === 0) {
-    block = withNativeTextDocument(() => (block as () => unknown)());
+    block = withNativeTextDocument(block as () => unknown);
   }
   if (block == null || typeof block === "boolean") return null;
   if (!Array.isArray(block)) return block;
@@ -253,7 +261,10 @@ function insertBlock(block: unknown, parent: NodeMirror): void {
 }
 
 function mountChildren(node: NodeMirror, slots: SlotBag): void {
-  insertBlock(slotDefault(slots), node);
+  // Compiler-emitted slots are plain functions. Pass them through without a
+  // wrapper closure/rest-argument array; leaf primitives have no slot work.
+  if (typeof slots === "function") insertBlock(withNativeTextDocument(slots), node);
+  else if (slots?.default) insertBlock(slotDefault(slots), node);
 }
 
 // A component/conditional/list item already supplies a lifetime scope. Plain
@@ -338,7 +349,7 @@ export function __createVaporPrimitive(tag: "view" | "text", props: Record<strin
       setProp(node, "class", normalizeClassValue(props.className), node.domAttrs?.class);
     }
     assignRef(valueOf(props.nodeRef ?? props["node-ref"]), node);
-  });
+    });
   return node;
 }
 

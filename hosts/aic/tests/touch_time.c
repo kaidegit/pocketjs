@@ -131,6 +131,11 @@ static void test_touch(void) {
 }
 
 static void test_time(void) {
+  assert(pocketjs_aic_fps(60, 1000, 1000) == 60);
+  assert(pocketjs_aic_fps(17, 2500, 1000) == 7);
+  assert(pocketjs_aic_fps(1, 16, 1000) == 63);
+  assert(pocketjs_aic_fps(10, (rt_tick_t)(8U - 0xfffffff8U), 1000) == 625);
+  assert(pocketjs_aic_fps(1, 0, 1000) == 0);
   const rt_tick_t boot = 0xffff0000U;
   assert(!pocketjs_aic_tick_reached(boot, 0)); /* Old calibration dead zone. */
   assert(pocketjs_aic_tick_reached(boot, boot));

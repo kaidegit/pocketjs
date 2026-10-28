@@ -62,6 +62,11 @@ globalThis.remount();
     let writes = 0;
     const setProp = wasm.ops.setProp;
     wasm.ops.setProp = (...args: Parameters<typeof setProp>) => { writes++; return setProp(...args); };
+    const setPropBatch = wasm.ops.setPropBatch;
+    if (setPropBatch) wasm.ops.setPropBatch = buffer => {
+      writes += new Float64Array(buffer).length / 3;
+      setPropBatch(buffer);
+    };
     type Snapshot = { id: number; presses: number; nodes: { id: number; text?: string; debug?: string; focusable?: boolean; style?: { insetL?: number } }[] };
     const guest = { ui: wasm.ops, console: { ...console, error: (e: unknown) => { throw e; } } } as unknown as {
       frame(buttons: number, analog?: number, touches?: number[], hits?: number[]): void;

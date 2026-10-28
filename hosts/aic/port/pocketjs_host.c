@@ -25,6 +25,7 @@
 #include "pocketjs_aic_contract.h"
 #include "pocketjs_com.h"
 #include "pocketjs_diag.h"
+#include "pocketjs_perf.h"
 #include "pocketjs_display.h"
 #include "pocketjs_ge.h"
 #include "pocketjs_gc.h"
@@ -250,6 +251,10 @@ static void pocketjs_aic_task(void *opaque) {
   }
 
   pocketjs_diag_sample("S2-guest", state.guest);
+  if (pocketjs_diag_install(state.guest) != ESP_OK) {
+    rt_kprintf("[PocketJS] diagnostic clock install failed\n");
+    goto cleanup;
+  }
 
 #ifndef POCKETJS_AIC_COM_DISABLE
   /* The product com surface must exist before the guest bundle evaluates:
@@ -329,6 +334,7 @@ static void pocketjs_aic_task(void *opaque) {
   rt_memset(display_info.buffers[0], 0, display_info.buffer_size);
   rt_memset(display_info.buffers[1], 0, display_info.buffer_size);
 
+  pocketjs_diag_hw();
   pocketjs_diag_sample("S5-renderer", state.guest);
 
   /* Compilation and mount can leave cycles that the first interaction
@@ -346,7 +352,8 @@ static void pocketjs_aic_task(void *opaque) {
   rt_tick_t next_frame = rt_tick_get();
   uint32_t frames = 0U;
   uint32_t frames_total = 0U;
-  rt_tick_t stats_deadline = rt_tick_get() + rt_tick_from_millisecond(1000U);
+  rt_tick_t stats_started = rt_tick_get();
+  rt_tick_t stats_deadline = stats_started + rt_tick_from_millisecond(1000U);
   uint32_t touch_reports = 0U;
   pocketjs_rgb565_render_stats_t second_stats;
   rt_memset(&second_stats, 0, sizeof(second_stats));
@@ -439,8 +446,12 @@ static void pocketjs_aic_task(void *opaque) {
     pocketjs_rgb565_render_stats_t frame_stats;
     rt_memset(&frame_stats, 0, sizeof(frame_stats));
     frame_stats.struct_size = sizeof(frame_stats);
-    if (pocketjs_rgb565_prepare(state.renderer, target, &frame, &plan) == ESP_OK) {
+    PJS_PERF_START(prepare_started);
+    const esp_err_t prepared = pocketjs_rgb565_prepare(state.renderer, target, &frame, &plan);
+    PJS_PERF_END(PJS_PERF_PREPARE, prepare_started);
+    if (prepared == ESP_OK) {
       esp_err_t render = ESP_OK;
+      PJS_PERF_START(raster_started);
       for (uint32_t region_index = 0U;
            region_index < plan.region_count && render == ESP_OK; region_index++) {
         const pocketjs_rgb565_rect_t region = plan.regions[region_index];
@@ -465,12 +476,21 @@ static void pocketjs_aic_task(void *opaque) {
       if (render == ESP_OK) {
         render = pocketjs_rgb565_commit(state.renderer, target, &frame);
       }
+      PJS_PERF_END(PJS_PERF_RASTER, raster_started);
       if (render != ESP_OK) {
         rt_kprintf("[PocketJS] render: failed (%d)\n", (int)render);
       } else {
-        pocketjs_aic_display_present(state.display, index);
-        state.buffer_index = index;
+        // An unchanged standby buffer needs no cache flush or page flip.
+        // Keep its target committed, and retain vsync pacing for input ticks.
+        if (plan.region_count != 0U) {
+          PJS_PERF_START(present_started);
+          pocketjs_aic_display_present(state.display, index);
+          PJS_PERF_END(PJS_PERF_PRESENT, present_started);
+          state.buffer_index = index;
+        }
+        PJS_PERF_START(vsync_started);
         pocketjs_aic_display_wait_vsync(state.display);
+        PJS_PERF_END(PJS_PERF_VSYNC, vsync_started);
       }
     } else {
       rt_kprintf("[PocketJS] render: prepare failed\n");
@@ -505,13 +525,18 @@ static void pocketjs_aic_task(void *opaque) {
       gc_count++;
     }
     if (pocketjs_aic_tick_reached(rt_tick_get(), stats_deadline)) {
-      stats_deadline += rt_tick_from_millisecond(1000U);
+      const rt_tick_t reported_at = rt_tick_get();
+      const rt_tick_t window_ticks = reported_at - stats_started;
+      stats_started = reported_at;
+      stats_deadline = reported_at + rt_tick_from_millisecond(1000U);
       pocketjs_guest_stats_t guest_stats;
       rt_memset(&guest_stats, 0, sizeof(guest_stats));
       guest_stats.struct_size = sizeof(guest_stats);
       const pocketjs_guest_stats_t *guest_stats_pointer =
           pocketjs_guest_stats(state.guest, &guest_stats) == ESP_OK ? &guest_stats : RT_NULL;
-      pocketjs_print_stats(frames, &second_stats, guest_stats_pointer);
+      pocketjs_print_stats(pocketjs_aic_fps(frames, window_ticks, RT_TICK_PER_SECOND),
+                          &second_stats, guest_stats_pointer);
+      pocketjs_perf_report((uint32_t)((uint64_t)window_ticks * 1000U / RT_TICK_PER_SECOND));
       rt_memset(&second_stats, 0, sizeof(second_stats));
       second_stats.struct_size = sizeof(second_stats);
       rt_size_t pool_total = 0U, pool_used = 0U, pool_max = 0U;

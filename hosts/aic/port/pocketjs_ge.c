@@ -24,6 +24,7 @@
 #include <rtthread.h>
 
 #include "pocketjs_ge.h"
+#include "pocketjs_perf.h"
 
 #ifdef POCKETJS_AIC_GE_DISABLE
 
@@ -153,7 +154,9 @@ static bool pocketjs_ge_fill(void *user_data, uint16_t *destination,
   state->fill_logged = true;
   if (trace) rt_kprintf("[PocketJS] ge: first fill begin\n");
   pocketjs_ge_clean_rows(destination, width, rect);
+  PJS_PERF_START(fill_wait_started);
   int result = mpp_ge_fillrect(state->ge, &fill);
+  PJS_PERF_END(PJS_PERF_GE_WAIT, fill_wait_started);
   if (trace) rt_kprintf("[PocketJS] ge: first fill end rc=%d\n", result);
   if (result < 0) {
     return false;
@@ -211,8 +214,7 @@ static bool pocketjs_ge_blend(void *user_data, uint16_t *destination,
     return false;
   }
   size_t pixels = (size_t)pitch * rect.height;
-  rt_memset(state->blend_source, 0, pixels * 4U);
-  rt_memset(state->blend_destination, 0, pixels * 2U);
+  PJS_PERF_START(convert_started);
   uint32_t rgb = (uint32_t)r << 16 | (uint32_t)g << 8 | b;
   for (uint32_t y = 0; y < rect.height; y++) {
     size_t offset = (size_t)(rect.y + y) * width + rect.x;
@@ -224,7 +226,16 @@ static bool pocketjs_ge_blend(void *user_data, uint16_t *destination,
       state->blend_source[index] = coverage << 24 | rgb;
       state->blend_destination[index] = destination[offset + x];
     }
+    // Every visible pixel was overwritten above. Only padding needs a
+    // deterministic value; clearing both whole surfaces doubles PSRAM writes.
+    for (uint32_t x = rect.width; x < pitch; x++) {
+      size_t index = (size_t)y * pitch + x;
+      state->blend_source[index] = 0U;
+      state->blend_destination[index] = 0U;
+    }
   }
+
+  PJS_PERF_END(PJS_PERF_GE_CONVERT, convert_started);
 
   struct ge_bitblt blt;
   rt_memset(&blt, 0, sizeof(blt));
@@ -252,9 +263,11 @@ static bool pocketjs_ge_blend(void *user_data, uint16_t *destination,
   if (trace) rt_kprintf("[PocketJS] ge: first A8 submit src=%p dst=%p strides=%u/%u\n",
                         (void *)state->blend_source, (void *)state->blend_destination,
                         (unsigned)blt.src_buf.stride[0], (unsigned)blt.dst_buf.stride[0]);
+  PJS_PERF_START(blend_wait_started);
   int result = mpp_ge_bitblt(state->ge, &blt);
   if (result >= 0) result = mpp_ge_emit(state->ge);
   if (result >= 0) result = mpp_ge_sync(state->ge);
+  PJS_PERF_END(PJS_PERF_GE_WAIT, blend_wait_started);
   if (trace) rt_kprintf("[PocketJS] ge: first A8 end rc=%d\n", result);
   /* Invalidate even on failure: GE may have modified part of the private
    * output. Nothing is copied to the caller unless the operation succeeded. */
@@ -262,10 +275,12 @@ static bool pocketjs_ge_blend(void *user_data, uint16_t *destination,
   if (result < 0) {
     return false;
   }
+  PJS_PERF_START(copy_started);
   for (uint32_t y = 0; y < rect.height; y++) {
     memcpy(destination + (size_t)(rect.y + y) * width + rect.x,
            state->blend_destination + (size_t)y * pitch, rect.width * 2U);
   }
+  PJS_PERF_END(PJS_PERF_GE_COPY, copy_started);
   return true;
 }
 
@@ -336,7 +351,10 @@ static bool pocketjs_ge_srm(void *user_data, uint16_t *destination,
   aicos_dcache_clean_range((unsigned long *)(uintptr_t)first_row, source_span);
 
   pocketjs_ge_clean_rows(destination, width, destination_rect);
-  if (mpp_ge_bitblt(state->ge, &blt) < 0) {
+  PJS_PERF_START(srm_wait_started);
+  int result = mpp_ge_bitblt(state->ge, &blt);
+  PJS_PERF_END(PJS_PERF_GE_WAIT, srm_wait_started);
+  if (result < 0) {
     return false;
   }
   pocketjs_ge_invalidate_rows(destination, width, destination_rect);

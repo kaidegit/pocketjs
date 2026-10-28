@@ -15,6 +15,12 @@
 
 #ifdef POCKETJS_AIC_DIAG
 
+/** Install the temporary TS profiler monotonic clock before bundle eval. */
+esp_err_t pocketjs_diag_install(pocketjs_guest_t *guest);
+
+/** Read hardware clock rates, cache CSRs and SYSMAP attributes. */
+void pocketjs_diag_hw(void);
+
 /** Print one [PJS-DIAG] sample block: system/TLSF heap with the free-block
  * walk, port allocation accounting, CMA, the pocketjs task stack high-water
  * and — when guest is non-NULL — the QuickJS engine and allocator stats.
@@ -40,6 +46,11 @@ void pocketjs_diag_request(const char *label);
 rt_bool_t pocketjs_diag_take_request(char *label, rt_size_t size);
 
 #else
+
+static inline esp_err_t pocketjs_diag_install(pocketjs_guest_t *guest) {
+  (void)guest; return ESP_OK;
+}
+static inline void pocketjs_diag_hw(void) {}
 
 static inline void pocketjs_diag_sample(const char *stage,
                                         pocketjs_guest_t *guest) {

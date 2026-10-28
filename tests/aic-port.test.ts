@@ -4,6 +4,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const root = new URL("..", import.meta.url).pathname;
+test("AIC decodes device SYSMAP readbacks using E907 attribute bit positions", () => {
+  const temporary = mkdtempSync(join(tmpdir(), "pocketjs-aic-hw-"));
+  try {
+    const binary = join(temporary, "hw-decode");
+    const built = Bun.spawnSync([process.env.CC ?? "cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+      "-I" + join(root, "hosts/aic/port"), join(root, "hosts/aic/tests/hw_decode.c"), "-o", binary],
+      { stdout: "pipe", stderr: "pipe" });
+    expect(built.exitCode, built.stderr.toString()).toBe(0);
+    const ran = Bun.spawnSync([binary], { stdout: "pipe", stderr: "pipe" });
+    expect(ran.exitCode, ran.stderr.toString()).toBe(0);
+    expect(ran.stdout.toString()).toContain("AIC hardware attribute decoding passed");
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
 test("AIC retains active touch snapshots and paces across the boot tick wrap", () => {
   const temporary = mkdtempSync(join(tmpdir(), "pocketjs-aic-port-"));
   try {

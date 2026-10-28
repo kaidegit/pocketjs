@@ -73,6 +73,25 @@ beforeEach(() => {
 });
 
 describe("native node DOM facade", () => {
+  test("defers unused DOM containers without sharing mutable values", () => {
+    const node = dom(createElement("view"));
+    expect(isNativeNode(node)).toBe(true);
+    expect(Object.hasOwn(node, "style")).toBe(false);
+    expect(Object.hasOwn(node, "classList")).toBe(false);
+    const style = node.style;
+    expect(Object.hasOwn(node, "style")).toBe(true);
+    expect(node.style).toBe(style);
+    expect(Object.hasOwn(node, "classList")).toBe(false);
+    const classes = node.classList;
+    expect(node.classList).toBe(classes);
+    const other = dom(createElement("view"));
+    expect(other.style).not.toBe(style);
+    expect(other.classList).not.toBe(classes);
+    const replacement = { length: 3, item: () => "test" };
+    other.style = replacement;
+    expect(other.style).toBe(replacement);
+    expect(node.style.length).toBe(0);
+  });
   test("shares functions for every creation path while isolating mutable containers", () => {
     const element = dom(createElement("view"));
     const nodes = [element, dom(createTextNode("a")), dom(createCommentNode("b")),

@@ -8,6 +8,12 @@
 
 #include "esp_log.h"
 #include "pocketjs/guest_quickjs.h"
+#ifdef POCKETJS_AIC_DIAG
+#include "pocketjs_perf.h"
+#else
+#define PJS_PERF_START(name) ((void)0)
+#define PJS_PERF_END(phase, name) ((void)0)
+#endif
 
 #define MAX_REGISTRATIONS 128U
 #define TARGET_ID_BYTES 16U
@@ -352,6 +358,29 @@ static JSValue js_set_prop(JSContext *ctx, JSValueConst this_value, int argc,
   (void)this_value;
   (void)magic;
   pocketjs_ui_core_set_prop(UI_CORE(ctx), a_i320, a_u321, a_f642);
+  return JS_UNDEFINED;
+}
+
+/* Existing optional HostOps batch contract; bytes are borrowed only while
+ * this synchronous call runs. memcpy avoids unaligned RV32 double loads. */
+static JSValue js_set_prop_batch(JSContext *ctx, JSValueConst receiver, int argc,
+                                 JSValueConst *argv, int magic, void *opaque) {
+  (void)receiver; (void)magic;
+  if (argc < 1) return JS_UNDEFINED;
+  size_t size = 0;
+  const uint8_t *bytes = JS_GetArrayBuffer(ctx, &size, argv[0]);
+  if (!bytes) return JS_HasException(ctx) ? JS_EXCEPTION : JS_UNDEFINED;
+  for (size_t offset = 0; size - offset >= 24U; offset += 24U) {
+    double record[3];
+    memcpy(record, bytes + offset, sizeof(record));
+    /* IDs are generated i32/u32 integers by the TS renderer. Reject invalid
+     * numeric records before C casts (NaN/out-of-range casts are undefined). */
+    if (!(record[0] >= INT32_MIN && record[0] <= INT32_MAX) ||
+        !(record[1] >= 0 && record[1] <= UINT32_MAX))
+      return JS_ThrowRangeError(ctx, "setPropBatch id or prop outside integer range");
+    pocketjs_ui_core_set_prop(UI_CORE(ctx), (int32_t)record[0],
+                               (uint32_t)record[1], record[2]);
+  }
   return JS_UNDEFINED;
 }
 
@@ -716,6 +745,7 @@ static esp_err_t install_ui(JSContext *ctx, void *user_data) {
   set_function(ctx, ui, "removeChild", js_remove_child, 2, binding);
   set_function(ctx, ui, "setStyle", js_set_style, 2, binding);
   set_function(ctx, ui, "setProp", js_set_prop, 3, binding);
+  set_function(ctx, ui, "setPropBatch", js_set_prop_batch, 1, binding);
   set_function(ctx, ui, "setText", js_set_text, 2, binding);
   set_function(ctx, ui, "replaceText", js_replace_text, 2, binding);
   set_function(ctx, ui, "uploadTexture", js_upload_texture, 4, binding);
@@ -839,9 +869,11 @@ esp_err_t pocketjs_ui_turn(pocketjs_ui_qjs_t *binding,
                      ((uint32_t)input->touches[index].y << 9U) |
                      input->touches[index].x;
   }
+  PJS_PERF_START(hit_started);
   const size_t hit_count =
       pocketjs_ui_core_touch_hits(binding->core, touches, input->touch_count,
                                   hits, POCKETJS_UI_MAX_TOUCHES);
+  PJS_PERF_END(PJS_PERF_HIT, hit_started);
   if (hit_count != input->touch_count)
     return ESP_FAIL;
   const pocketjs_guest_frame_t frame = {
@@ -853,11 +885,18 @@ esp_err_t pocketjs_ui_turn(pocketjs_ui_qjs_t *binding,
       .touch_hits = hits,
       .touch_count = input->touch_count,
   };
+  PJS_PERF_START(js_started);
   esp_err_t result = pocketjs_guest_frame(binding->guest, &frame);
+  PJS_PERF_END(PJS_PERF_JS, js_started);
   if (result != ESP_OK)
     return result;
+  PJS_PERF_START(tick_started);
   pocketjs_ui_core_tick(binding->core);
-  return pocketjs_ui_core_draw(binding->core, out_frame);
+  PJS_PERF_END(PJS_PERF_TICK, tick_started);
+  PJS_PERF_START(draw_started);
+  result = pocketjs_ui_core_draw(binding->core, out_frame);
+  PJS_PERF_END(PJS_PERF_DRAW, draw_started);
+  return result;
 }
 
 uint32_t pocketjs_ui_qjs_tick_hz(const pocketjs_ui_qjs_t *binding) {

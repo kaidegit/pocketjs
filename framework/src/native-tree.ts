@@ -128,6 +128,31 @@ function setDomAttribute(node: NodeMirror, name: string, value: unknown): void {
 // functions across mirrors instead of capturing each node in accessors and
 // methods; the mutable attribute/style/classList containers remain per node.
 const nativeNodePrototype = Object.defineProperties({}, {
+  [DOM_NODE]: { value: true },
+  // Plain renderer primitives never touch these DOM compatibility objects.
+  // Allocate them on first access, keeping each node's mutable state private.
+  style: {
+    configurable: true,
+    get(this: NodeMirror) {
+      const value = { length: 0, item: emptyStyleItem };
+      Object.defineProperty(this, "style", { value, writable: true, configurable: true, enumerable: true });
+      return value;
+    },
+    set(this: NodeMirror, value: unknown) {
+      Object.defineProperty(this, "style", { value, writable: true, configurable: true, enumerable: true });
+    },
+  },
+  classList: {
+    configurable: true,
+    get(this: NodeMirror) {
+      const value = { add: ignoreClassListChange, remove: ignoreClassListChange };
+      Object.defineProperty(this, "classList", { value, writable: true, configurable: true, enumerable: true });
+      return value;
+    },
+    set(this: NodeMirror, value: unknown) {
+      Object.defineProperty(this, "classList", { value, writable: true, configurable: true, enumerable: true });
+    },
+  },
   nodeType: {
     configurable: true,
     get(this: NodeMirror) {
@@ -311,11 +336,6 @@ function ignoreClassListChange(): void {}
 export function decorateNativeNode(node: NodeMirror): NodeMirror {
   if ((node as unknown as Record<symbol, unknown>)[DOM_NODE] === true) return node;
   Object.setPrototypeOf(node, nativeNodePrototype);
-  Object.defineProperty(node, DOM_NODE, { value: true });
-  Object.assign(node, {
-    style: { length: 0, item: emptyStyleItem },
-    classList: { add: ignoreClassListChange, remove: ignoreClassListChange },
-  });
   return node;
 }
 
@@ -714,6 +734,9 @@ function setStyleObject(node: NodeMirror, value: unknown, prev: unknown): void {
   const next = (value ?? {}) as StyleObject;
   const before = (prev ?? {}) as StyleObject;
   let changed = false;
+  // Do not auto-pack inline styles: coarse AIC A/B measured the temporary
+  // array/Float64 path slower than direct writes. Explicit jump batches keep
+  // their separate optional HostOps API.
   for (const key in next) {
     const v = next[key];
     if (before[key] === v) continue;

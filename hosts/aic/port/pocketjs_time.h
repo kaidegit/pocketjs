@@ -16,4 +16,11 @@ static inline rt_tick_t pocketjs_aic_ticks_until(rt_tick_t now,
   return remaining < 0x80000000U ? remaining : 0U;
 }
 
+/* Count divided by actual elapsed time, including a long turn. Never report
+ * a short catch-up window as if it were a whole second. */
+static inline uint32_t pocketjs_aic_fps(uint32_t frames, rt_tick_t elapsed,
+                                      uint32_t ticks_per_second) {
+  return elapsed ? (uint32_t)(((uint64_t)frames * ticks_per_second + elapsed / 2U) / elapsed) : 0U;
+}
+
 #endif /* POCKETJS_AIC_TIME_H */

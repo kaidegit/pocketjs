@@ -140,6 +140,25 @@ use out (`-DPOCKETJS_AIC_GE_DISABLE`) and the accelerator table stays NULL,
 matching the pre-GE firmware; the per-second log line reports the split as
 `ge_fill=… ge_blend=… ge_srm=…`.
 
+With `POCKETJS_DIAG` enabled, `[PJS-HW]` reports CMU rates and gates, the QSPI
+XIP divider, MHCR/MHINT, and SYSMAP attributes before the first frame. The
+`pjs_hw` console command repeats these register reads without changing clocks,
+cache state, or memory attributes. E907 SYSMAP SO/C/B are bits 4/3/2:
+0x0c is cacheable/bufferable and 0x10 is strongly ordered. The SDK SYSMAP
+masks have different positions; the diagnostic decoder follows the E907
+manual and has regression cases from device readbacks. Divider readback does not measure physical
+pin frequency; gate state and the controller's internal divider also matter.
+
+The host reports FPS over the actual elapsed window and resets the deadline
+from the report time, so a long turn does not create short catch-up windows.
+With diagnostics enabled, 88 bytes of fixed counters report UI hit/JS/core
+work, RGB565 preparation/raster work, present/vsync maxima, and cumulative
+GE conversion/wait/copy time. `turn_max` covers the whole `pocketjs_ui_turn`,
+including layout/draw, rather than JS alone. The clock is SDK monotonic time.
+A standby target with no damage is committed without cache-cleaning or page
+flipping; vsync pacing remains. GE scratch conversion initializes padding
+only, since valid pixels are overwritten. No buffers or heap limits grow.
+
 ## Verification
 
 - `bun tools/aic.ts package` twice — the `.pocket` bytes are identical.
@@ -178,3 +197,29 @@ matching the pre-GE firmware; the per-second log line reports the split as
   takes about 2660 KB of it. A package larger than the remaining headroom
   needs the `os` partition widened again or an external load path. The
   QuickJS heap limit is 4 MB of RT-Thread heap.
+
+Temporary TS diagnostics: diagnostic builds install `__pocketjsPerfNowUs()`
+before bundle evaluation. It returns full monotonic SDK microseconds, not RTC
+or virtual frame time. The application may use it for `[PJS-TS]` nested timing;
+`POCKETJS_DIAG=0` removes this clock. TS trace rows and wrappers belong to the
+diagnostic app; firmware heaps and renderer buffers are unchanged. Console
+output lies outside TS spans but inside the C guest-frame timing. Remove the
+TS trace before comparing production latency.
+
+The shared QuickJS binding now exposes the existing optional `setPropBatch`
+contract (little-endian Float64 node/prop/value triples, synchronous and
+ordered; incomplete trailing records ignored). Inline styles use it for
+multiple changed values; single changes and hosts without the method retain
+scalar writes. Packets are temporary, with no per-node persistent cache.
+
+The current diagnostic app uses coarse TS timing (components, keyboard
+effects, Vue flush and frame), without wrapping ui.* or tracing native-tree/
+primitive property calls. Compare scalar compatibility and batch builds with
+identical coarse instrumentation; old dense trace totals include substantial
+measurement overhead and are not a net-speed baseline.
+
+Coarse board A/B did not justify automatic inline-style batching (the tested
+batch sample was slower). Inline styles now use direct setProp even when the
+optional native batch API is available; explicit jump batches retain that API.
+The current diagnostic banner separates `inline=scalar` from `batch_api=1`.
+Earlier scalar/batch build descriptions are historical comparison artifacts.
